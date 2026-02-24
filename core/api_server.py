@@ -104,6 +104,13 @@ def create_app(strategies_path: Optional[str] = None) -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/strategies/kill")
+    def kill_strategy(req: StopStrategyRequest) -> Dict[str, Any]:
+        try:
+            return runtime.orchestrator.kill_strategy(req.strategy_name)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/strategies/stop-all")
     def stop_all() -> Dict[str, Any]:
         return runtime.orchestrator.stop_all()
@@ -139,4 +146,3 @@ def create_app(strategies_path: Optional[str] = None) -> FastAPI:
         return {"messages": runtime.alert_system.evaluate_rules()}
 
     return app
-
