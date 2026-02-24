@@ -21,6 +21,15 @@ class LiveTestStrategy(Strategy):
         """Inicializa la estrategia de prueba"""
         # FORZAR trading continuo para crypto (24/7)
         self.market_hours = None  # Disable market hours checking
+        try:
+            self.set_market("24/7")
+        except Exception:
+            pass
+        if hasattr(self, "broker") and self.broker is not None:
+            try:
+                self.broker.market = "24/7"
+            except Exception:
+                pass
         
         # Parámetros configurables
         # Usar formato correcto para crypto: BASE/QUOTE

@@ -131,6 +131,7 @@ class ChatService:
             "/status [strategy]\n"
             "/set <strategy> <param> <value>\n"
             "/stop [strategy|all]\n"
+            "/kill <strategy>\n"
             "/pnl [mode=paper|live]\n"
             "/list alerts\n"
         )
@@ -228,6 +229,12 @@ class ChatService:
                 return ChatResponse(json.dumps(orchestrator.stop_strategy(running[0]), ensure_ascii=True, indent=2))
             return ChatResponse("Multiple strategies are running. Use /stop <strategy> or /stop all.")
 
+        if command == "kill":
+            if not args:
+                return ChatResponse("Usage:\n/kill <strategy>")
+            result = orchestrator.kill_strategy(args[0])
+            return ChatResponse(json.dumps(result, ensure_ascii=True, indent=2))
+
         if command == "status":
             if args:
                 status = orchestrator.get_strategy_status(args[0])
@@ -296,4 +303,3 @@ class ChatService:
             command = tokens[0][1:].split("@", 1)[0].lower()
             return self.handle_command(chat_id, user_id, command, tokens[1:])
         return self.handle_chat(chat_id, user_id, text)
-
