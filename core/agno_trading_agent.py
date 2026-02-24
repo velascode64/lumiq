@@ -17,7 +17,10 @@ from agno.agent import Agent
 from agno.models.anthropic import Claude
 from agno.models.openai import OpenAIChat
 from agno.tools import tool
-from agno.tools.mcp import MCPTools
+try:
+    from agno.tools.mcp import MCPTools
+except Exception:  # pragma: no cover
+    MCPTools = None
 from lumibot.brokers import Alpaca
 
 try:
@@ -389,7 +392,7 @@ def create_trading_agent(orchestrator: StrategyOrchestrator) -> Optional[Agent]:
 
     # Attach optional MCP configuration to the agent instance.
     # This keeps constructor compatibility across Agno versions.
-    mcp_command = _resolve_alpaca_mcp_command()
+    mcp_command = _resolve_alpaca_mcp_command() if MCPTools is not None else None
     setattr(agent, "_alpaca_mcp_command", mcp_command)
     setattr(agent, "_alpaca_mcp_env", _build_mcp_env())
     setattr(agent, "_orchestrator", orchestrator)
@@ -466,7 +469,7 @@ def run_agent_message(agent: Agent, message: str, user_id: str, session_id: str)
         if direct is not None:
             return direct
 
-    if mcp_command:
+    if mcp_command and MCPTools is not None:
         async def _run_with_mcp() -> Any:
             mcp_tools = MCPTools(
                 command=mcp_command,
