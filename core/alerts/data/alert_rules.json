@@ -42,7 +42,7 @@
       "chat_id": 8101362735,
       "cooldown_seconds": 300,
       "id": "QQQ-1771874426",
-      "last_triggered_at": "2026-02-23T20:39:22.554650+00:00",
+      "last_triggered_at": "2026-02-24T21:59:56.147554+00:00",
       "symbol": "QQQ",
       "target": 600.0,
       "type": "target_price"
@@ -57,8 +57,18 @@
       "symbol": "PLTR",
       "threshold": 0.0,
       "type": "percent_drop"
+    },
+    {
+      "active": true,
+      "chat_id": 8101362735,
+      "cooldown_seconds": 300,
+      "id": "RANGO_NO_ESPECIFICADO-1771970716",
+      "last_triggered_at": null,
+      "symbol": "RANGO_NO_ESPECIFICADO",
+      "threshold": 2.0,
+      "type": "percent_drop"
     }
   ],
   "schema_version": 1,
-  "updated_at": "2026-02-24T00:29:25.196525"
+  "updated_at": "2026-02-24T17:05:17.009841"
 }

@@ -26,6 +26,25 @@ except Exception:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
+def _collect_member_names(response_obj) -> list[str]:
+    """
+    Extract delegated member names from a TeamRunResponse/RunResponse tree.
+    """
+    names: list[str] = []
+    member_responses = getattr(response_obj, "member_responses", None) or []
+    for member in member_responses:
+        agent_name = getattr(member, "agent_name", None)
+        team_name = getattr(member, "team_name", None)
+        if agent_name:
+            names.append(str(agent_name))
+        elif team_name:
+            names.append(f"team:{team_name}")
+        nested = _collect_member_names(member)
+        if nested:
+            names.extend(nested)
+    return names
+
+
 def _resolve_model():
     """
     Resolve Agno model from environment.
@@ -77,23 +96,32 @@ def create_alerts_trading_team(orchestrator, alert_system) -> Optional[Team]:
     except ImportError:
         from .alerts.agents.alert_agent import create_alert_agent
 
+    try:
+        from alerts.agents.technical_agent import create_technical_agent
+    except ImportError:
+        from .alerts.agents.technical_agent import create_technical_agent
+
     model = _resolve_model()
     if model is None:
         return None
 
     trading_agent = create_trading_agent(orchestrator)
     alert_agent = None
+    technical_agent = None
     if alert_system is not None:
         alert_agent = create_alert_agent(alert_system)
+        technical_agent = create_technical_agent(alert_system)
 
-    members = [m for m in (alert_agent, trading_agent) if m is not None]
+    members = [m for m in (alert_agent, technical_agent, trading_agent) if m is not None]
     if not members:
         return None
 
     instructions = [
-        "Eres un orquestador que decide si un mensaje es de ALERTAS o de TRADING.",
+        "Eres un orquestador que decide si un mensaje es de ALERTAS, TECHNICALS o TRADING.",
         "Si el usuario pide crear o modificar alertas (drop %, target price, reglas), usa el agente de alertas.",
         "Si el usuario pregunta por precios actuales (BTC/ETH/SPY/etc.), usa el agente de alertas.",
+        "Si el usuario pregunta technicals (RSI, MACD, Bollinger, sobrecompra/sobreventa, soporte/resistencia, rebote, breakdown, cuantas veces toco un precio, caidas historicas), usa el agente de technicals.",
+        "Si el usuario pide interpretacion de un nivel de precio o comportamiento historico despues de tocar un nivel, usa el agente de technicals.",
         "Si el usuario pide info de estrategias, estado o PnL, usa el agente de trading.",
         "Responde en español de forma concisa.",
     ]
@@ -118,7 +146,21 @@ def create_alerts_trading_team(orchestrator, alert_system) -> Optional[Team]:
 def run_team_message(team: Team, message: str, user_id: str, session_id: str) -> str:
     """Run one message through the Team and return plain text output."""
     try:
+        logger.info(
+            "Agno Team input | team=%s | session_id=%s | user_id=%s | message=%s",
+            getattr(team, "name", None) or team.__class__.__name__,
+            session_id,
+            user_id,
+            message,
+        )
         response = team.run(message, user_id=user_id, session_id=session_id)
+        routed_members = _collect_member_names(response)
+        logger.info(
+            "Agno Team routed | team=%s | session_id=%s | members=%s",
+            getattr(team, "name", None) or team.__class__.__name__,
+            session_id,
+            routed_members or ["unknown"],
+        )
         content = getattr(response, "content", None)
         if content is None:
             return "No se pudo generar una respuesta."

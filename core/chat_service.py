@@ -119,6 +119,86 @@ class ChatService:
     def __init__(self, runtime):
         self.runtime = runtime
 
+    def examples_text(self, agent: Optional[str] = None) -> str:
+        key = (agent or "all").strip().lower()
+        aliases = {
+            "technical": "technicals",
+            "tecnico": "technicals",
+            "tecnicos": "technicals",
+            "technicals": "technicals",
+            "ta": "technicals",
+            "alert": "alerts",
+            "alerts": "alerts",
+            "alertas": "alerts",
+            "trading": "trading",
+            "trade": "trading",
+            "estrategias": "trading",
+            "strategy": "trading",
+            "all": "all",
+            "todos": "all",
+        }
+        key = aliases.get(key, key if key in {"technicals", "alerts", "trading"} else "all")
+
+        sections: List[str] = []
+        if key in {"all", "technicals"}:
+            sections.append(
+                "\n".join(
+                    [
+                        "Ejemplos - Agente de Technicals",
+                        "- ¿Cuántas veces ETH tocó 3000 este año?",
+                        "- ¿Cuántas veces AAPL cerró por encima de 180 en 6 meses?",
+                        "- ¿ETH está en sobrecompra o sobreventa en 1D?",
+                        "- ¿Cuántas veces RSI de BTC pasó de 70 y qué pasó después?",
+                        "- ¿Cuántas caídas mayores a 3% tuvo ETH este año?",
+                        "- ¿Ese nivel (2900) actuó como soporte o se rompió?",
+                        "- ¿Hubo rebote o breakdown después de tocar 500 en SPY?",
+                        "- Explícame simple qué dicen RSI, MACD y Bollinger de NVDA hoy.",
+                    ]
+                )
+            )
+
+        if key in {"all", "alerts"}:
+            sections.append(
+                "\n".join(
+                    [
+                        "Ejemplos - Agente de Alertas",
+                        "- Créame una alerta de caída de 2% para ETH",
+                        "- Avísame cuando BTC llegue a 70000",
+                        "- Crea alerta RSI oversold para NVDA",
+                        "- Crea alerta RSI overbought para TSLA",
+                        "- Crea alerta de cruce MACD alcista para AAPL",
+                        "- Crea alerta Bollinger middle cross para SPY",
+                        "- Lista mis alertas activas",
+                        "- Desactiva la alerta <rule_id>",
+                    ]
+                )
+            )
+
+        if key in {"all", "trading"}:
+            sections.append(
+                "\n".join(
+                    [
+                        "Ejemplos - Agente de Trading / Core",
+                        "- ¿Qué estrategias están corriendo?",
+                        "- Dame el estado de ETHMomentumLive",
+                        "- ¿Cómo va el PnL de esta semana?",
+                        "- ¿Cuál es el estado de mi cuenta Alpaca y posiciones abiertas?",
+                        "- Ajusta el parámetro risk_per_trade de ETHMomentumLive a 0.01",
+                        "",
+                        "Comandos útiles:",
+                        "- /strategies",
+                        "- /running",
+                        "- /status [strategy]",
+                        "- /pnl [mode=paper|live]",
+                        "- /run <strategy> mode=paper",
+                        "- /stop <strategy>",
+                    ]
+                )
+            )
+
+        header = "Usa /examples technicals | /examples alerts | /examples trading para filtrar.\n"
+        return header + "\n\n".join(sections)
+
     def help_text(self) -> str:
         mode_text = "Conversational Agno mode: ON" if (self.runtime.team or self.runtime.agent) else "Conversational Agno mode: OFF"
         return (
@@ -134,6 +214,7 @@ class ChatService:
             "/kill <strategy>\n"
             "/pnl [mode=paper|live]\n"
             "/list alerts\n"
+            "/examples [technicals|alerts|trading]\n"
         )
 
     def get_alerts_summary(self, chat_id: Optional[int] = None) -> str:
@@ -198,6 +279,10 @@ class ChatService:
 
         if command == "list" and args and args[0].lower() == "alerts":
             return ChatResponse(self.get_alerts_summary(chat_id), parse_mode=None)
+
+        if command == "examples":
+            topic = args[0] if args else None
+            return ChatResponse(self.examples_text(topic), parse_mode=None)
 
         if command == "strategies":
             available = orchestrator.list_available_strategies()
