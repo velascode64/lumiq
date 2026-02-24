@@ -11,3 +11,5 @@ anthropic
 mcp
 schedule
 pytest
+fastapi
+uvicorn[standard]
