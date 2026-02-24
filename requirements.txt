@@ -1,0 +1,13 @@
+lumibot
+alpaca-py>=0.42.0
+pandas>=2.2.0
+numpy>=1.20.0
+yfinance>=0.2.61
+python-dotenv
+requests
+agno
+openai
+anthropic
+mcp
+schedule
+pytest

@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg-info/
+
+# Envs
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+
+# Logs & caches
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Frontend
+node_modules/
+.next/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime data
+core/alerts/data/*.json
