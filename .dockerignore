@@ -1,0 +1,14 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.env
+.venv
+venv
+node_modules
+front/node_modules
+front/.next
+core/__pycache__
+core/alerts/data/*.json

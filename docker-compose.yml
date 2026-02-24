@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/core.Dockerfile
+    container_name: lumiq-core-api
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./core/alerts/data:/app/core/alerts/data
+    restart: unless-stopped
+    command: ["python", "core/run_api.py", "--host", "0.0.0.0", "--port", "8000"]
+
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: docker/telegram-bot.Dockerfile
+    container_name: lumiq-telegram-bot
+    env_file:
+      - .env
+    depends_on:
+      - api
+    restart: unless-stopped
+    command: ["python", "telegram_bot/run_bot.py", "--api-base-url", "http://api:8000"]
+
