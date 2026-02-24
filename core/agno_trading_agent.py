@@ -403,6 +403,13 @@ def create_trading_agent(orchestrator: StrategyOrchestrator) -> Optional[Agent]:
 def run_agent_message(agent: Agent, message: str, user_id: str, session_id: str) -> str:
     """Run one message through the agent and return plain text output."""
     logger = logging.getLogger(__name__)
+    logger.info(
+        "Agno Agent input | agent=%s | session_id=%s | user_id=%s | message=%s",
+        getattr(agent, "name", None) or agent.__class__.__name__,
+        session_id,
+        user_id,
+        message,
+    )
     mcp_command = getattr(agent, "_alpaca_mcp_command", None)
     trade_intent_hints = ("compra", "compre", "comprar", "buy", "vende", "vender", "sell", "cerrar", "close", "cancelar", "cancel")
     lower_message = message.lower()
@@ -517,6 +524,13 @@ def run_agent_message(agent: Agent, message: str, user_id: str, session_id: str)
                 f"Solicitud del usuario: {message}"
             )
         response = agent.run(final_message, user_id=user_id, session_id=session_id)
+
+    logger.info(
+        "Agno Agent output | agent=%s | session_id=%s | agent_name=%s",
+        getattr(agent, "name", None) or agent.__class__.__name__,
+        session_id,
+        getattr(response, "agent_name", None),
+    )
 
     content = getattr(response, "content", None)
     if content is None:
