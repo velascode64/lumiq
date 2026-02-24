@@ -1,0 +1,64 @@
+{
+  "rules": [
+    {
+      "active": true,
+      "chat_id": 8101362735,
+      "id": "ETH/USD-1771653756",
+      "last_triggered_at": "2026-02-23T17:51:09.196690+00:00",
+      "reference_price": 1845.924,
+      "symbol": "ETH/USD",
+      "threshold": 0.24,
+      "type": "percent_drop"
+    },
+    {
+      "active": true,
+      "chat_id": 8101362735,
+      "id": "SPY-1771653920",
+      "symbol": "SPY",
+      "target": 1985.63,
+      "type": "target_price"
+    },
+    {
+      "active": true,
+      "chat_id": 8101362735,
+      "id": "ETH/USD-1771654676",
+      "last_triggered_at": "2026-02-22T11:58:30.264740+00:00",
+      "reference_price": 1961.52,
+      "symbol": "ETH/USD",
+      "threshold": 1.0,
+      "type": "percent_rise"
+    },
+    {
+      "active": true,
+      "chat_id": 8101362735,
+      "id": "ETH/USD-1771654779",
+      "last_triggered_at": "2026-02-23T19:13:06.126013+00:00",
+      "symbol": "ETH/USD",
+      "target": 1864.75,
+      "type": "target_price"
+    },
+    {
+      "active": true,
+      "chat_id": 8101362735,
+      "cooldown_seconds": 300,
+      "id": "QQQ-1771874426",
+      "last_triggered_at": "2026-02-23T20:39:22.554650+00:00",
+      "symbol": "QQQ",
+      "target": 600.0,
+      "type": "target_price"
+    },
+    {
+      "active": true,
+      "chat_id": 8101362735,
+      "cooldown_seconds": 300,
+      "id": "PLTR-1771877849",
+      "last_triggered_at": "2026-02-23T20:22:39.456655+00:00",
+      "reference_price": 129.905,
+      "symbol": "PLTR",
+      "threshold": 0.0,
+      "type": "percent_drop"
+    }
+  ],
+  "schema_version": 1,
+  "updated_at": "2026-02-23T15:39:22.555199"
+}
