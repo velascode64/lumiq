@@ -1,0 +1,43 @@
+{
+  "groups": {
+    "crypto": [
+      "BTC/USD",
+      "ETH/USD"
+    ],
+    "favorites": [
+      "PLTR",
+      "SLV",
+      "NVDA"
+    ],
+    "faang": [
+      "FAANG",
+      "META",
+      "QQQ",
+      "TSLA",
+      "GOOGL",
+      "AAPL",
+      "AMZN",
+      "NFLX",
+      "UBER"
+    ],
+    "cybersecurity": [
+      "OKTA"
+    ]
+  },
+  "favorites": [
+    "PLTR",
+    "SLV",
+    "NVDA",
+    "ETH/USD"
+  ],
+  "benchmarks": {
+    "stocks": [
+      "SPY",
+      "QQQ"
+    ],
+    "crypto": [
+      "BTC/USD",
+      "ETH/USD"
+    ]
+  }
+}
