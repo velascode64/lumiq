@@ -20,12 +20,14 @@ try:
     from .agno_team_orchestrator import create_alerts_trading_team
     from .alerts.alert_system import AlertSystem
     from .alerts.streaming import AlertStreamManager
+    from .portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
 except ImportError:
     from strategy_orchestrator import StrategyOrchestrator
     from agno_trading_agent import create_trading_agent
     from agno_team_orchestrator import create_alerts_trading_team
     from alerts.alert_system import AlertSystem
     from alerts.streaming import AlertStreamManager
+    from portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,9 @@ class CoreRuntime:
         self.alert_system: Optional[AlertSystem] = None
         self.stream_manager: Optional[AlertStreamManager] = None
         self.notifier = TelegramNotifier()
+        self.watchlist_store = WatchlistStore()
+        self.portfolio_review_service: Optional[PortfolioReviewService] = None
+        self.portfolio_review_scheduler: Optional[PortfolioReviewScheduler] = None
 
         try:
             self.alert_system = AlertSystem()
@@ -109,14 +114,31 @@ class CoreRuntime:
             )
             self.alert_system.set_stream_manager(self.stream_manager)
 
+        try:
+            data_service = getattr(self.alert_system, "data_service", None) if self.alert_system is not None else None
+            self.portfolio_review_service = PortfolioReviewService(
+                broker_config=broker_config,
+                watchlist_store=self.watchlist_store,
+                data_service=data_service,
+            )
+            self.portfolio_review_scheduler = PortfolioReviewScheduler(
+                review_service=self.portfolio_review_service,
+                send_callback=self.notifier.send,
+            )
+        except Exception as exc:
+            logger.warning("PortfolioReview disabled: %s", exc)
+
         self.agent = create_trading_agent(self.orchestrator)
         self.team = create_alerts_trading_team(self.orchestrator, self.alert_system)
 
     def start_background(self) -> None:
         if self.stream_manager is not None:
             self.stream_manager.start_in_thread()
+        if self.portfolio_review_scheduler is not None:
+            self.portfolio_review_scheduler.start_in_thread()
 
     def stop_background(self) -> None:
         if self.stream_manager is not None:
             self.stream_manager.stop()
-
+        if self.portfolio_review_scheduler is not None:
+            self.portfolio_review_scheduler.stop()

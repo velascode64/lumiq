@@ -22,6 +22,7 @@ try:
     from .alpaca_pnl import get_pnl_report, get_realized_pnl_summary
     from .alerts.streaming import AlertStreamManager
     from .alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
+    from .portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
 except ImportError:
     from agno_trading_agent import create_trading_agent, run_agent_message
     from agno_team_orchestrator import create_alerts_trading_team, run_team_message
@@ -29,6 +30,7 @@ except ImportError:
     from alpaca_pnl import get_pnl_report, get_realized_pnl_summary
     from alerts.streaming import AlertStreamManager
     from alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
+    from portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
 
 try:
     from alerts.alert_system import AlertSystem
@@ -318,6 +320,9 @@ class TradingTelegramBot:
     def __init__(self, token: str, orchestrator: StrategyOrchestrator):
         self.token = token
         self.orchestrator = orchestrator
+        self.watchlist_store = WatchlistStore()
+        self.portfolio_review_service = None
+        self.portfolio_review_scheduler = None
         self.alert_system = None
         self.stream_manager = None
         try:
@@ -330,6 +335,20 @@ class TradingTelegramBot:
                 send_callback=lambda chat_id, msg: self._send_message(chat_id, msg, parse_mode=None),
             )
             self.alert_system.set_stream_manager(self.stream_manager)
+
+        try:
+            data_service = getattr(self.alert_system, "data_service", None) if self.alert_system is not None else None
+            self.portfolio_review_service = PortfolioReviewService(
+                broker_config=self.orchestrator.broker_config,
+                watchlist_store=self.watchlist_store,
+                data_service=data_service,
+            )
+            self.portfolio_review_scheduler = PortfolioReviewScheduler(
+                review_service=self.portfolio_review_service,
+                send_callback=lambda chat_id, msg: self._send_message(chat_id, msg, parse_mode=None),
+            )
+        except Exception as exc:
+            logger.warning("PortfolioReview disabled: %s", exc)
 
         self.agent = create_trading_agent(orchestrator)
         self.team = create_alerts_trading_team(orchestrator, self.alert_system)
@@ -401,6 +420,8 @@ class TradingTelegramBot:
             "/pnl [mode=paper|live] - P&L report (daily, weekly, all-time)\n\n"
             "/list alerts - list active alert rules\n\n"
             "/examples [technicals|alerts|trading] - example questions by agent\n\n"
+            "/report <pre_open|midday|close|weekly> - async report to Telegram\n"
+            "/watchlist [list|groups|add|fav] ...\n\n"
             "You can also send natural language messages to control trading."
         )
 
@@ -475,6 +496,40 @@ class TradingTelegramBot:
         if command == "examples":
             topic = args[0] if args else None
             return _examples_text(topic)
+
+        if command == "report":
+            if not args:
+                return "Uso: /report <pre_open|midday|close|weekly>"
+            if self.portfolio_review_scheduler is None:
+                return "Portfolio review scheduler no disponible."
+            kind = args[0].lower()
+            try:
+                started = self.portfolio_review_scheduler.trigger_async(kind, chat_id=chat_id, source="manual")
+            except Exception as exc:
+                return f"Error iniciando reporte: {exc}"
+            if started:
+                return f"Generando reporte {kind}... te lo envio cuando este listo."
+            return f"Ya hay un reporte {kind} ejecutandose para este chat."
+
+        if command == "watchlist":
+            action = (args[0].lower() if args else "list")
+            if action in {"list", "groups"}:
+                return self.watchlist_store.summary_text()
+            if action in {"add", "fav", "favorite"}:
+                if len(args) < 2:
+                    return "Uso: /watchlist add <ticker> [grupo1,grupo2] [favorite=true] | /watchlist fav <ticker>"
+                ticker = args[1]
+                try:
+                    if action in {"fav", "favorite"}:
+                        result = self.watchlist_store.add_favorite(ticker)
+                    else:
+                        groups = [g.strip() for g in (args[2].split(",") if len(args) >= 3 else []) if g.strip()]
+                        favorite = len(args) >= 4 and args[3].strip().lower() in {"1", "true", "yes", "fav", "favorite"}
+                        result = self.watchlist_store.add_ticker(ticker, groups=groups, favorite=favorite)
+                    return "Watchlist actualizado: " + json.dumps(result, ensure_ascii=True)
+                except Exception as exc:
+                    return f"No se pudo actualizar watchlist: {exc}"
+            return "Uso: /watchlist [list|groups|add|fav] ..."
 
         if command == "strategies":
             available = self.orchestrator.list_available_strategies()
@@ -581,6 +636,9 @@ class TradingTelegramBot:
         return "Unknown command. Use /help"
 
     def _handle_chat(self, chat_id: int, user_id: int, text: str) -> str:
+        watchlist_response = self._maybe_handle_watchlist_natural_language(text)
+        if watchlist_response is not None:
+            return watchlist_response
         if self.alert_system is not None:
             self.alert_system.set_active_chat_id(chat_id)
             rsi_response = self._maybe_handle_rsi_natural_language(text, chat_id)
@@ -608,6 +666,73 @@ class TradingTelegramBot:
             user_id=str(user_id),
             session_id=session_id,
         )
+
+    def _maybe_handle_watchlist_natural_language(self, text: str) -> Optional[str]:
+        if self.watchlist_store is None:
+            return None
+        lower = text.lower()
+        if not any(token in lower for token in {"watchlist", "favorito", "favoritos", "grupo"}):
+            return None
+        is_create_group = ("grupo" in lower) and any(t in lower for t in {"crea", "crear", "agrega", "añade", "anade"})
+        is_add_fav = any(t in lower for t in {"favoritos", "favorito"}) and any(t in lower for t in {"agrega", "añade", "anade", "crea", "crear"})
+        if not is_create_group and not is_add_fav:
+            return None
+
+        group_name: Optional[str] = None
+        m = re.search(r"(?:llam[ae]\w*|nombre(?:ado)?(?:\s+de)?)\s+([A-Za-z0-9_-]+)", text, flags=re.IGNORECASE)
+        if m:
+            group_name = m.group(1).strip().lower()
+        if is_create_group and not group_name:
+            m2 = re.search(r"grupo(?:\s+de\s+favoritos)?\s+(?:que\s+se\s+llame\s+)?([A-Za-z0-9_-]+)", text, flags=re.IGNORECASE)
+            if m2:
+                cand = m2.group(1).strip().lower()
+                if cand not in {"con", "las", "los", "siguientes", "stocks", "acciones"}:
+                    group_name = cand
+
+        symbols = self._extract_symbols(text)
+        noise = {
+            "CREA", "CREAR", "GRUPO", "FAVORITO", "FAVORITOS", "STOCK", "STOCKS", "ACCION", "ACCIONES",
+            "SIGUIENTES", "CON", "QUE", "SE", "LLAME", "LAS", "LOS", "DE", "Y", "EL", "LA", "WATCHLIST",
+        }
+        dedup: List[str] = []
+        seen = set()
+        for s in symbols:
+            if s.upper() in noise:
+                continue
+            if group_name and s.upper() == group_name.upper():
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            dedup.append(s)
+        symbols = dedup
+        if not symbols:
+            return None
+
+        if is_create_group:
+            group_name = group_name or "favorites"
+            added: List[str] = []
+            for s in symbols:
+                try:
+                    self.watchlist_store.add_ticker(s, groups=[group_name], favorite=False)
+                    added.append(s)
+                except Exception:
+                    continue
+            if added:
+                return f"Grupo '{group_name}' actualizado con {len(added)} tickers: " + ", ".join(added)
+            return "No pude agregar tickers al grupo."
+
+        if is_add_fav:
+            added: List[str] = []
+            for s in symbols:
+                try:
+                    self.watchlist_store.add_favorite(s)
+                    added.append(s)
+                except Exception:
+                    continue
+            if added:
+                return "Favoritos actualizados: " + ", ".join(added)
+        return None
 
     def _maybe_handle_rsi_natural_language(self, text: str, chat_id: int) -> Optional[str]:
         if self.alert_system is None:
@@ -717,6 +842,8 @@ class TradingTelegramBot:
         logger.info("Starting Telegram polling bot")
         if self.stream_manager is not None:
             self.stream_manager.start_in_thread()
+        if self.portfolio_review_scheduler is not None:
+            self.portfolio_review_scheduler.start_in_thread()
         offset: Optional[int] = None
         while True:
             try:
@@ -728,6 +855,8 @@ class TradingTelegramBot:
                 logger.info("Bot stopped by user")
                 if self.stream_manager is not None:
                     self.stream_manager.stop()
+                if self.portfolio_review_scheduler is not None:
+                    self.portfolio_review_scheduler.stop()
                 break
             except Exception as exc:
                 logger.exception("Polling error: %s", exc)

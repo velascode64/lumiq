@@ -215,6 +215,8 @@ class ChatService:
             "/pnl [mode=paper|live]\n"
             "/list alerts\n"
             "/examples [technicals|alerts|trading]\n"
+            "/report <pre_open|midday|close|weekly>\n"
+            "/watchlist [list|groups|add|fav] ...\n"
         )
 
     def get_alerts_summary(self, chat_id: Optional[int] = None) -> str:
@@ -272,6 +274,69 @@ class ChatService:
         kind = "oversold" if is_oversold and not is_overbought else "overbought"
         return "RSI " + kind + " creado para: " + ", ".join(str(r.get("symbol")) for r in created)
 
+    def _maybe_handle_watchlist_natural_language(self, text: str) -> Optional[str]:
+        store = getattr(self.runtime, "watchlist_store", None)
+        if store is None:
+            return None
+        lower = text.lower()
+        if not any(token in lower for token in {"watchlist", "favorito", "favoritos", "grupo"}):
+            return None
+        is_create_group = ("grupo" in lower) and any(t in lower for t in {"crea", "crear", "agrega", "añade", "anade"})
+        is_add_fav = any(t in lower for t in {"favoritos", "favorito"}) and any(t in lower for t in {"agrega", "añade", "anade", "crea", "crear"})
+        if not is_create_group and not is_add_fav:
+            return None
+
+        group_name: Optional[str] = None
+        m = re.search(r"(?:llam[ae]\w*|nombre(?:ado)?(?:\s+de)?)\s+([A-Za-z0-9_-]+)", text, flags=re.IGNORECASE)
+        if m:
+            group_name = m.group(1).strip().lower()
+        if is_create_group and not group_name:
+            m2 = re.search(r"grupo(?:\s+de\s+favoritos)?\s+(?:que\s+se\s+llame\s+)?([A-Za-z0-9_-]+)", text, flags=re.IGNORECASE)
+            if m2:
+                candidate = m2.group(1).strip().lower()
+                if candidate not in {"con", "las", "los", "siguientes", "stocks", "acciones"}:
+                    group_name = candidate
+
+        symbols = self._extract_symbols(text)
+        noise = {
+            "CREA", "CREAR", "GRUPO", "FAVORITO", "FAVORITOS", "STOCK", "STOCKS", "ACCION", "ACCIONES",
+            "SIGUIENTES", "CON", "QUE", "SE", "LLAME", "LAS", "LOS", "DE", "Y", "EL", "LA", "WATCHLIST",
+        }
+        symbols = [s for s in symbols if s.upper() not in noise and len(s) >= 2]
+        if group_name:
+            symbols = [s for s in symbols if s.upper() != group_name.upper()]
+        # De-duplicate preserving order
+        seen = set()
+        symbols = [s for s in symbols if not (s in seen or seen.add(s))]
+        if not symbols:
+            return None
+
+        if is_create_group:
+            if not group_name:
+                group_name = "favorites"
+            added = []
+            for s in symbols:
+                try:
+                    store.add_ticker(s, groups=[group_name], favorite=False)
+                    added.append(s)
+                except Exception:
+                    continue
+            if not added:
+                return "No pude agregar tickers al grupo."
+            return f"Grupo '{group_name}' actualizado con {len(added)} tickers: " + ", ".join(added)
+
+        if is_add_fav:
+            added = []
+            for s in symbols:
+                try:
+                    store.add_favorite(s)
+                    added.append(s)
+                except Exception:
+                    continue
+            if added:
+                return "Favoritos actualizados: " + ", ".join(added)
+        return None
+
     def handle_command(self, chat_id: int, user_id: int, command: str, args: List[str]) -> ChatResponse:
         orchestrator = self.runtime.orchestrator
         if command in {"start", "help"}:
@@ -283,6 +348,48 @@ class ChatService:
         if command == "examples":
             topic = args[0] if args else None
             return ChatResponse(self.examples_text(topic), parse_mode=None)
+
+        if command == "report":
+            if not args:
+                return ChatResponse("Uso: /report <pre_open|midday|close|weekly>", parse_mode=None)
+            scheduler = getattr(self.runtime, "portfolio_review_scheduler", None)
+            if scheduler is None:
+                return ChatResponse("Portfolio review scheduler no disponible.", parse_mode=None)
+            kind = args[0].lower()
+            try:
+                started = scheduler.trigger_async(kind, chat_id=chat_id, source="manual")
+            except Exception as exc:
+                return ChatResponse(f"Error iniciando reporte: {exc}", parse_mode=None)
+            if started:
+                return ChatResponse(f"Generando reporte {kind}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
+            return ChatResponse(f"Ya hay un reporte {kind} en ejecución para este chat.", parse_mode=None)
+
+        if command == "watchlist":
+            store = getattr(self.runtime, "watchlist_store", None)
+            if store is None:
+                return ChatResponse("Watchlist store no disponible.", parse_mode=None)
+            action = (args[0].lower() if args else "list")
+            if action in {"list", "groups"}:
+                return ChatResponse(store.summary_text(), parse_mode=None)
+            if action in {"add", "fav", "favorite"}:
+                if len(args) < 2:
+                    return ChatResponse("Uso: /watchlist add <ticker> [grupo1,grupo2] | /watchlist fav <ticker>", parse_mode=None)
+                ticker = args[1]
+                try:
+                    if action in {"fav", "favorite"}:
+                        result = store.add_favorite(ticker)
+                    else:
+                        groups = []
+                        favorite = False
+                        if len(args) >= 3:
+                            groups = [g.strip() for g in args[2].split(",") if g.strip()]
+                        if len(args) >= 4:
+                            favorite = args[3].strip().lower() in {"1", "true", "yes", "fav", "favorite"}
+                        result = store.add_ticker(ticker, groups=groups, favorite=favorite)
+                    return ChatResponse(f"Watchlist actualizado: {json.dumps(result, ensure_ascii=True)}", parse_mode=None)
+                except Exception as exc:
+                    return ChatResponse(f"No se pudo actualizar watchlist: {exc}", parse_mode=None)
+            return ChatResponse("Uso: /watchlist [list|groups|add|fav] ...", parse_mode=None)
 
         if command == "strategies":
             available = orchestrator.list_available_strategies()
@@ -361,6 +468,10 @@ class ChatService:
         return ChatResponse("Unknown command. Use /help")
 
     def handle_chat(self, chat_id: int, user_id: int, text: str) -> ChatResponse:
+        watchlist_response = self._maybe_handle_watchlist_natural_language(text)
+        if watchlist_response is not None:
+            return ChatResponse(watchlist_response, parse_mode=None)
+
         if self.runtime.alert_system is not None:
             self.runtime.alert_system.set_active_chat_id(chat_id)
             rsi_response = self._maybe_handle_rsi_natural_language(text, chat_id)
