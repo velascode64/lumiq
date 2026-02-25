@@ -201,6 +201,56 @@ class WatchlistStore:
     def add_favorite(self, ticker: str) -> Dict[str, Any]:
         return self.add_ticker(ticker, groups=["favorites"], favorite=True)
 
+    def remove_group(self, group_name: str) -> Dict[str, Any]:
+        cfg = self.load()
+        group = str(group_name or "").strip().lower()
+        if not group:
+            raise ValueError("group_name vacío")
+        existed = group in cfg.groups
+        removed = cfg.groups.pop(group, [])
+        self.save(cfg)
+        return {"group": group, "removed_group": bool(existed), "tickers_removed_count": len(removed)}
+
+    def remove_ticker(
+        self,
+        ticker: str,
+        group_name: Optional[str] = None,
+        from_favorites: bool = False,
+    ) -> Dict[str, Any]:
+        cfg = self.load()
+        sym = _normalize_symbol(ticker)
+        if not sym:
+            raise ValueError("ticker vacío")
+
+        removed_from_groups: List[str] = []
+        if group_name:
+            g = str(group_name).strip().lower()
+            current = cfg.groups.get(g) or []
+            if sym in current:
+                cfg.groups[g] = [t for t in current if t != sym]
+                if not cfg.groups[g]:
+                    cfg.groups.pop(g, None)
+                removed_from_groups.append(g)
+        else:
+            for g, current in list(cfg.groups.items()):
+                if sym in current:
+                    cfg.groups[g] = [t for t in current if t != sym]
+                    if not cfg.groups[g]:
+                        cfg.groups.pop(g, None)
+                    removed_from_groups.append(g)
+
+        removed_favorite = False
+        if from_favorites or (group_name and str(group_name).strip().lower() == "favorites"):
+            if sym in cfg.favorites:
+                cfg.favorites = [t for t in cfg.favorites if t != sym]
+                removed_favorite = True
+        self.save(cfg)
+        return {
+            "ticker": sym,
+            "removed_from_groups": removed_from_groups,
+            "removed_from_favorites": removed_favorite,
+        }
+
     def summary_text(self) -> str:
         cfg = self.load()
         lines = ["Watchlist groups:"]
@@ -493,6 +543,7 @@ class PortfolioReviewService:
         self,
         report_kind: str,
         include_benchmark: bool = True,
+        group_name: Optional[str] = None,
     ) -> str:
         kind = (report_kind or "").strip().lower()
         if kind not in {"pre_open", "midday", "close", "weekly"}:
@@ -504,6 +555,18 @@ class PortfolioReviewService:
         positions: Dict[str, Dict[str, Any]] = base["positions"]
         account = base["account"]
         universe: List[str] = base["universe"]
+        normalized_group_name: Optional[str] = None
+        group_filtered_symbols: Optional[Set[str]] = None
+        if group_name:
+            normalized_group_name = str(group_name).strip().lower()
+            group_tickers = cfg.groups.get(normalized_group_name)
+            if not group_tickers:
+                available = ", ".join(sorted(cfg.groups.keys())) or "sin grupos"
+                raise ValueError(f"Grupo '{normalized_group_name}' no existe. Grupos disponibles: {available}")
+            group_filtered_symbols = set(group_tickers)
+            # Strict group filter: only tickers from requested group.
+            universe = [s for s in universe if s in group_filtered_symbols]
+            include_benchmark = False
         recent_sells = self._fetch_recent_sells(days=30)
         snaps = self._collect_snapshots(universe)
 
@@ -547,13 +610,22 @@ class PortfolioReviewService:
             "close": "Reporte Cierre",
             "weekly": "Reporte Semanal",
         }
-        lines.append(f"{title_map[kind]} ({ny_now.strftime('%Y-%m-%d %H:%M %Z')})")
+        if normalized_group_name:
+            lines.append(f"{title_map[kind]} - grupo {normalized_group_name} ({ny_now.strftime('%Y-%m-%d %H:%M %Z')})")
+        else:
+            lines.append(f"{title_map[kind]} ({ny_now.strftime('%Y-%m-%d %H:%M %Z')})")
         lines.append("")
         lines.append("Resumen ejecutivo:")
         lines.append(
             f"- Portfolio value: {self._format_money(account.get('portfolio_value'))} | Cash: {self._format_money(account.get('cash'))} | Buying power: {self._format_money(account.get('buying_power'))}"
         )
-        lines.append(f"- Posiciones abiertas: {len(positions)} | Universe monitoreado: {len(universe)} tickers")
+        if normalized_group_name:
+            group_positions_count = sum(1 for s in (group_filtered_symbols or set()) if s in positions)
+            lines.append(f"- Posiciones abiertas (totales): {len(positions)} | Posiciones en grupo: {group_positions_count} | Universe monitoreado: {len(universe)} tickers")
+        else:
+            lines.append(f"- Posiciones abiertas: {len(positions)} | Universe monitoreado: {len(universe)} tickers")
+        if normalized_group_name:
+            lines.append(f"- Filtro de grupo activo: {normalized_group_name} ({len(cfg.groups.get(normalized_group_name, []))} tickers)")
         if portfolio_snaps:
             port_day_moves = [s.day_change_pct for s in portfolio_snaps if s.day_change_pct is not None]
             if port_day_moves:
@@ -620,7 +692,14 @@ class PortfolioReviewService:
         exposure = self._build_group_exposure(positions, cfg)
         lines.append("")
         lines.append("Exposicion por grupo:")
-        if not exposure:
+        if normalized_group_name:
+            mv = 0.0
+            for t in (cfg.groups.get(normalized_group_name) or []):
+                pos = positions.get(t)
+                if pos:
+                    mv += _safe_float(pos.get("market_value"), 0.0)
+            lines.append(f"- {normalized_group_name}: {self._format_money(mv) if mv else '$0.00'}")
+        elif not exposure:
             lines.append("- Sin posiciones mapeadas a grupos del watchlist")
         else:
             for group, mv in exposure[:8]:
@@ -725,22 +804,32 @@ class PortfolioReviewScheduler:
                 time.sleep(10)
 
     def trigger_async(self, report_kind: str, chat_id: Optional[int] = None, source: str = "manual") -> bool:
+        return self.trigger_async_with_group(report_kind, chat_id=chat_id, source=source, group_name=None)
+
+    def trigger_async_with_group(
+        self,
+        report_kind: str,
+        chat_id: Optional[int] = None,
+        source: str = "manual",
+        group_name: Optional[str] = None,
+    ) -> bool:
         kind = (report_kind or "").strip().lower()
         if kind in {"daily", "day"}:
             kind = "close"
         if kind not in {"pre_open", "midday", "close", "weekly"}:
             raise ValueError("Invalid report kind")
-        job_key = f"{kind}:{chat_id or 'broadcast'}"
+        gk = (group_name or "").strip().lower() or "all"
+        job_key = f"{kind}:{gk}:{chat_id or 'broadcast'}"
         with self._lock:
             if job_key in self._running_jobs:
                 return False
             self._running_jobs.add(job_key)
-        self._executor.submit(self._run_job, job_key, kind, chat_id, source)
+        self._executor.submit(self._run_job, job_key, kind, chat_id, source, (group_name or None))
         return True
 
-    def _run_job(self, job_key: str, report_kind: str, chat_id: Optional[int], source: str) -> None:
+    def _run_job(self, job_key: str, report_kind: str, chat_id: Optional[int], source: str, group_name: Optional[str] = None) -> None:
         try:
-            text = self.review_service.generate_report_text(report_kind, include_benchmark=True)
+            text = self.review_service.generate_report_text(report_kind, include_benchmark=True, group_name=group_name)
             prefix = f"[{source}] " if source else ""
             final_text = prefix + text
             target_ids = [int(chat_id)] if chat_id is not None else list(self.chat_ids)
@@ -753,13 +842,13 @@ class PortfolioReviewScheduler:
                 except Exception as exc:
                     logger.exception("Failed to send portfolio report to chat_id=%s: %s", cid, exc)
         except Exception as exc:
-            logger.exception("Portfolio report job failed (%s): %s", report_kind, exc)
+            logger.exception("Portfolio report job failed (%s, group=%s): %s", report_kind, group_name, exc)
             if chat_id is not None:
                 try:
-                    self.send_callback(int(chat_id), f"No se pudo generar el reporte {report_kind}: {exc}")
+                    extra = f" del grupo {group_name}" if group_name else ""
+                    self.send_callback(int(chat_id), f"No se pudo generar el reporte {report_kind}{extra}: {exc}")
                 except Exception:
                     pass
         finally:
             with self._lock:
                 self._running_jobs.discard(job_key)
-

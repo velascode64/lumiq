@@ -1,12 +1,5 @@
 {
   "groups": {
-    "fang": [
-      "AAPL",
-      "AMZN",
-      "META",
-      "NFLX",
-      "GOOGL"
-    ],
     "crypto": [
       "BTC/USD",
       "ETH/USD"
@@ -26,6 +19,9 @@
       "AMZN",
       "NFLX",
       "UBER"
+    ],
+    "cybersecurity": [
+      "OKTA"
     ]
   },
   "favorites": [
