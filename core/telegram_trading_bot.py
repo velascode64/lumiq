@@ -23,6 +23,8 @@ try:
     from .alerts.streaming import AlertStreamManager
     from .alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
     from .portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
+    from .news_monitor import WatchlistNewsMonitorService, WatchlistNewsScheduler
+    from .agno_news_agent import create_news_agent, run_news_agent_message
 except ImportError:
     from agno_trading_agent import create_trading_agent, run_agent_message
     from agno_team_orchestrator import create_alerts_trading_team, run_team_message
@@ -31,6 +33,8 @@ except ImportError:
     from alerts.streaming import AlertStreamManager
     from alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
     from portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
+    from news_monitor import WatchlistNewsMonitorService, WatchlistNewsScheduler
+    from agno_news_agent import create_news_agent, run_news_agent_message
 
 try:
     from alerts.alert_system import AlertSystem
@@ -323,6 +327,9 @@ class TradingTelegramBot:
         self.watchlist_store = WatchlistStore()
         self.portfolio_review_service = None
         self.portfolio_review_scheduler = None
+        self.news_monitor_service = None
+        self.news_scheduler = None
+        self.news_agent = None
         self.alert_system = None
         self.stream_manager = None
         try:
@@ -349,9 +356,30 @@ class TradingTelegramBot:
             )
         except Exception as exc:
             logger.warning("PortfolioReview disabled: %s", exc)
+        try:
+            self.news_monitor_service = WatchlistNewsMonitorService(watchlist_store=self.watchlist_store)
+            self.news_agent = create_news_agent(self.news_monitor_service)
+            def _news_analyze_callback(group_name: Optional[str]) -> str:
+                if self.news_agent is None:
+                    return self.news_monitor_service.generate_preopen_digest_text(group_name=group_name)
+                scope = f" del grupo {group_name}" if group_name else " de mi watchlist"
+                msg = (
+                    "Genera el digest de noticias pre-apertura para Telegram.\n"
+                    "Usa tools reales para leer noticias y clasificalas por relevancia.\n"
+                    f"Analiza noticias{scope} de las ultimas 18 horas.\n"
+                    "Formato: Resumen, Alta prioridad, Impacto en posiciones, Impacto en watchlist sin posicion, Ruido, Tickers a revisar primero, Sugerencias."
+                )
+                return run_news_agent_message(self.news_agent, msg, user_id="cron-news", session_id=f"news-preopen-{group_name or 'all'}")
+            self.news_scheduler = WatchlistNewsScheduler(
+                service=self.news_monitor_service,
+                send_callback=lambda chat_id, msg: self._send_message(chat_id, msg, parse_mode=None),
+                analyze_callback=_news_analyze_callback,
+            )
+        except Exception as exc:
+            logger.warning("WatchlistNewsMonitor disabled: %s", exc)
 
         self.agent = create_trading_agent(orchestrator)
-        self.team = create_alerts_trading_team(orchestrator, self.alert_system)
+        self.team = create_alerts_trading_team(orchestrator, self.alert_system, self.news_monitor_service)
         self.base_url = f"https://api.telegram.org/bot{token}"
         if self.team is not None:
             logger.info("Agno Team enabled (alerts + trading)")
@@ -421,6 +449,7 @@ class TradingTelegramBot:
             "/list alerts - list active alert rules\n\n"
             "/examples [technicals|alerts|trading] - example questions by agent\n\n"
             "/report <pre_open|midday|close|weekly> - async report to Telegram\n"
+            "/news [watchlist|group <name>] - pre-open news digest (manual fallback)\n"
             "/watchlist [list|groups|add|fav] ...\n\n"
             "You can also send natural language messages to control trading."
         )
@@ -510,6 +539,22 @@ class TradingTelegramBot:
             if started:
                 return f"Generando reporte {kind}... te lo envio cuando este listo."
             return f"Ya hay un reporte {kind} ejecutandose para este chat."
+
+        if command == "news":
+            if self.news_scheduler is None:
+                return "News scheduler no disponible."
+            group_name = None
+            if args and args[0].lower() == "group":
+                if len(args) < 2:
+                    return "Uso: /news [watchlist|group <name>]"
+                group_name = args[1]
+            elif args and args[0].lower() not in {"watchlist", "today", "hoy"}:
+                group_name = args[0]
+            started = self.news_scheduler.trigger_async(chat_id=chat_id, source="manual", group_name=group_name)
+            if started:
+                scope = f" del grupo {group_name}" if group_name else ""
+                return f"Generando digest de noticias{scope}... te lo envio cuando este listo."
+            return "Ya hay un digest de noticias ejecutandose."
 
         if command == "watchlist":
             action = (args[0].lower() if args else "list")
@@ -962,6 +1007,8 @@ class TradingTelegramBot:
             self.stream_manager.start_in_thread()
         if self.portfolio_review_scheduler is not None:
             self.portfolio_review_scheduler.start_in_thread()
+        if self.news_scheduler is not None:
+            self.news_scheduler.start_in_thread()
         offset: Optional[int] = None
         while True:
             try:
@@ -975,6 +1022,8 @@ class TradingTelegramBot:
                     self.stream_manager.stop()
                 if self.portfolio_review_scheduler is not None:
                     self.portfolio_review_scheduler.stop()
+                if self.news_scheduler is not None:
+                    self.news_scheduler.stop()
                 break
             except Exception as exc:
                 logger.exception("Polling error: %s", exc)

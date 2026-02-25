@@ -21,6 +21,8 @@ try:
     from .alerts.alert_system import AlertSystem
     from .alerts.streaming import AlertStreamManager
     from .portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
+    from .news_monitor import WatchlistNewsMonitorService, WatchlistNewsScheduler
+    from .agno_news_agent import create_news_agent, run_news_agent_message
 except ImportError:
     from strategy_orchestrator import StrategyOrchestrator
     from agno_trading_agent import create_trading_agent
@@ -28,6 +30,8 @@ except ImportError:
     from alerts.alert_system import AlertSystem
     from alerts.streaming import AlertStreamManager
     from portfolio_review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
+    from news_monitor import WatchlistNewsMonitorService, WatchlistNewsScheduler
+    from agno_news_agent import create_news_agent, run_news_agent_message
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +105,9 @@ class CoreRuntime:
         self.watchlist_store = WatchlistStore()
         self.portfolio_review_service: Optional[PortfolioReviewService] = None
         self.portfolio_review_scheduler: Optional[PortfolioReviewScheduler] = None
+        self.news_monitor_service: Optional[WatchlistNewsMonitorService] = None
+        self.news_scheduler: Optional[WatchlistNewsScheduler] = None
+        self.news_agent = None
 
         try:
             self.alert_system = AlertSystem()
@@ -128,17 +135,43 @@ class CoreRuntime:
         except Exception as exc:
             logger.warning("PortfolioReview disabled: %s", exc)
 
+        try:
+            self.news_monitor_service = WatchlistNewsMonitorService(watchlist_store=self.watchlist_store)
+            self.news_agent = create_news_agent(self.news_monitor_service)
+            def _news_analyze_callback(group_name: Optional[str]) -> str:
+                if self.news_agent is None:
+                    return self.news_monitor_service.generate_preopen_digest_text(group_name=group_name)
+                scope = f" del grupo {group_name}" if group_name else " de mi watchlist"
+                msg = (
+                    "Genera el digest de noticias pre-apertura para Telegram.\n"
+                    "Usa tools reales para leer noticias y clasificalas por relevancia.\n"
+                    f"Analiza noticias{scope} de las ultimas 18 horas.\n"
+                    "Formato: Resumen, Alta prioridad, Impacto en posiciones, Impacto en watchlist sin posicion, Ruido, Tickers a revisar primero, Sugerencias."
+                )
+                return run_news_agent_message(self.news_agent, msg, user_id="cron-news", session_id=f"news-preopen-{group_name or 'all'}")
+            self.news_scheduler = WatchlistNewsScheduler(
+                service=self.news_monitor_service,
+                send_callback=self.notifier.send,
+                analyze_callback=_news_analyze_callback,
+            )
+        except Exception as exc:
+            logger.warning("WatchlistNewsMonitor disabled: %s", exc)
+
         self.agent = create_trading_agent(self.orchestrator)
-        self.team = create_alerts_trading_team(self.orchestrator, self.alert_system)
+        self.team = create_alerts_trading_team(self.orchestrator, self.alert_system, self.news_monitor_service)
 
     def start_background(self) -> None:
         if self.stream_manager is not None:
             self.stream_manager.start_in_thread()
         if self.portfolio_review_scheduler is not None:
             self.portfolio_review_scheduler.start_in_thread()
+        if self.news_scheduler is not None:
+            self.news_scheduler.start_in_thread()
 
     def stop_background(self) -> None:
         if self.stream_manager is not None:
             self.stream_manager.stop()
         if self.portfolio_review_scheduler is not None:
             self.portfolio_review_scheduler.stop()
+        if self.news_scheduler is not None:
+            self.news_scheduler.stop()

@@ -216,6 +216,7 @@ class ChatService:
             "/list alerts\n"
             "/examples [technicals|alerts|trading]\n"
             "/report <pre_open|midday|close|weekly>\n"
+            "/news [watchlist|group <name>]\n"
             "/watchlist [list|groups|add|fav] ...\n"
         )
 
@@ -475,6 +476,23 @@ class ChatService:
             if started:
                 return ChatResponse(f"Generando reporte {kind}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
             return ChatResponse(f"Ya hay un reporte {kind} en ejecución para este chat.", parse_mode=None)
+
+        if command == "news":
+            scheduler = getattr(self.runtime, "news_scheduler", None)
+            if scheduler is None:
+                return ChatResponse("News scheduler no disponible.", parse_mode=None)
+            group_name = None
+            if args and args[0].lower() == "group":
+                if len(args) < 2:
+                    return ChatResponse("Uso: /news [watchlist|group <name>]", parse_mode=None)
+                group_name = args[1]
+            elif args and args[0].lower() not in {"watchlist", "today", "hoy"}:
+                group_name = args[0]
+            started = scheduler.trigger_async(chat_id=chat_id, source="manual", group_name=group_name)
+            if started:
+                scope = f" del grupo {group_name}" if group_name else ""
+                return ChatResponse(f"Generando digest de noticias{scope}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
+            return ChatResponse("Ya hay un digest de noticias en ejecución.", parse_mode=None)
 
         if command == "watchlist":
             store = getattr(self.runtime, "watchlist_store", None)
