@@ -81,7 +81,7 @@ def _resolve_model():
     return None
 
 
-def create_alerts_trading_team(orchestrator, alert_system) -> Optional[Team]:
+def create_alerts_trading_team(orchestrator, alert_system, news_service=None) -> Optional[Team]:
     """
     Create a Team with alert + trading agents in route mode.
     Returns None when no LLM API key is configured.
@@ -100,6 +100,10 @@ def create_alerts_trading_team(orchestrator, alert_system) -> Optional[Team]:
         from alerts.agents.technical_agent import create_technical_agent
     except ImportError:
         from .alerts.agents.technical_agent import create_technical_agent
+    try:
+        from .agno_news_agent import create_news_agent
+    except ImportError:
+        from agno_news_agent import create_news_agent
 
     model = _resolve_model()
     if model is None:
@@ -108,20 +112,24 @@ def create_alerts_trading_team(orchestrator, alert_system) -> Optional[Team]:
     trading_agent = create_trading_agent(orchestrator)
     alert_agent = None
     technical_agent = None
+    news_agent = None
     if alert_system is not None:
         alert_agent = create_alert_agent(alert_system)
         technical_agent = create_technical_agent(alert_system)
+    if news_service is not None:
+        news_agent = create_news_agent(news_service)
 
-    members = [m for m in (alert_agent, technical_agent, trading_agent) if m is not None]
+    members = [m for m in (alert_agent, technical_agent, news_agent, trading_agent) if m is not None]
     if not members:
         return None
 
     instructions = [
-        "Eres un orquestador que decide si un mensaje es de ALERTAS, TECHNICALS o TRADING.",
+        "Eres un orquestador que decide si un mensaje es de ALERTAS, TECHNICALS, NOTICIAS o TRADING.",
         "Si el usuario pide crear o modificar alertas (drop %, target price, reglas), usa el agente de alertas.",
         "Si el usuario pregunta por precios actuales (BTC/ETH/SPY/etc.), usa el agente de alertas.",
         "Si el usuario pregunta technicals (RSI, MACD, Bollinger, sobrecompra/sobreventa, soporte/resistencia, rebote, breakdown, cuantas veces toco un precio, caidas historicas), usa el agente de technicals.",
         "Si el usuario pide interpretacion de un nivel de precio o comportamiento historico despues de tocar un nivel, usa el agente de technicals.",
+        "Si el usuario pregunta por noticias, catalysts, headlines, impacto de noticias en posiciones/watchlist, resumen pre-market o pre-open, usa el agente de noticias.",
         "Si el usuario pide info de estrategias, estado o PnL, usa el agente de trading.",
         "Responde en español de forma concisa.",
     ]
