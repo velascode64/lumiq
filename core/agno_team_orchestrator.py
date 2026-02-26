@@ -1,7 +1,5 @@
 """
-Agno Team orchestration for trading + alerts.
-
-Routes user messages to the appropriate agent (trading or alerts).
+Agno Team orchestration for alerts, technical analysis, live trading, and strategy operations.
 """
 
 from __future__ import annotations
@@ -87,9 +85,11 @@ def create_alerts_trading_team(orchestrator, alert_system, news_service=None) ->
     Returns None when no LLM API key is configured.
     """
     try:
-        from .agno_trading_agent import create_trading_agent
+        from .agno_strategy_ops_agent import create_strategy_ops_agent
+        from .agno_live_trading_agent import create_live_trading_agent
     except ImportError:
-        from agno_trading_agent import create_trading_agent
+        from agno_strategy_ops_agent import create_strategy_ops_agent
+        from agno_live_trading_agent import create_live_trading_agent
 
     try:
         from alerts.agents.alert_agent import create_alert_agent
@@ -109,7 +109,8 @@ def create_alerts_trading_team(orchestrator, alert_system, news_service=None) ->
     if model is None:
         return None
 
-    trading_agent = create_trading_agent(orchestrator)
+    strategy_ops_agent = create_strategy_ops_agent(orchestrator)
+    live_trading_agent = create_live_trading_agent(getattr(orchestrator, "broker_config", None))
     alert_agent = None
     technical_agent = None
     news_agent = None
@@ -119,19 +120,22 @@ def create_alerts_trading_team(orchestrator, alert_system, news_service=None) ->
     if news_service is not None:
         news_agent = create_news_agent(news_service)
 
-    members = [m for m in (alert_agent, technical_agent, news_agent, trading_agent) if m is not None]
+    members = [m for m in (alert_agent, technical_agent, news_agent, live_trading_agent, strategy_ops_agent) if m is not None]
     if not members:
         return None
 
     instructions = [
-        "Eres un orquestador que decide si un mensaje es de ALERTAS, TECHNICALS, NOTICIAS o TRADING.",
-        "Si el usuario pide crear o modificar alertas (drop %, target price, reglas), usa el agente de alertas.",
-        "Si el usuario pregunta por precios actuales (BTC/ETH/SPY/etc.), usa el agente de alertas.",
-        "Si el usuario pregunta technicals (RSI, MACD, Bollinger, sobrecompra/sobreventa, soporte/resistencia, rebote, breakdown, cuantas veces toco un precio, caidas historicas), usa el agente de technicals.",
-        "Si el usuario pide interpretacion de un nivel de precio o comportamiento historico despues de tocar un nivel, usa el agente de technicals.",
-        "Si el usuario pregunta por noticias, catalysts, headlines, impacto de noticias en posiciones/watchlist, resumen pre-market o pre-open, usa el agente de noticias.",
-        "Si el usuario pide info de estrategias, estado o PnL, usa el agente de trading.",
-        "Responde en español de forma concisa.",
+        "You are an orchestrator that routes each message to the correct domain: ALERTS, TECHNICALS, NEWS, LIVE_TRADING, or STRATEGY_OPS.",
+        "When delegating, use the exact member IDs shown by the team (lowercase), not display names.",
+        "Member IDs in this team may include: alertanalyst, technicalanalyst, newsanalyst, livetradingagent, lumibotstrategyopsassistant.",
+        "If the user asks to create or modify alerts (drop %, target price, rules), use the alerts agent.",
+        "If the user asks for current prices (BTC/ETH/SPY/etc.), use the alerts agent.",
+        "If the user asks about technicals (RSI, MACD, Bollinger, overbought/oversold, support/resistance, bounce, breakdown, how many times price touched a level, historical drops), use the technicals agent.",
+        "If the user asks for interpretation of a price level or historical behavior after touching a level, use the technicals agent.",
+        "If the user asks about news, catalysts, headlines, news impact on positions/watchlist, pre-market/pre-open summaries, route to member ID newsanalyst.",
+        "If the user asks for a direct manual broker action (buy, sell, close position, cancel/modify order, market/limit order), route to member ID livetradingagent.",
+        "If the user asks for strategy info, strategy status, strategy parameters, strategy PnL, running strategies, or account state in the context of Lumibot operations, route to member ID lumibotstrategyopsassistant.",
+        "Respond in the same language as the user's latest message (Spanish or English), concisely.",
     ]
 
     desired_kwargs = {
