@@ -24,7 +24,7 @@ trap cleanup EXIT INT TERM
 
 echo "[stack] starting core api on ${API_HOST}:${API_PORT}"
 conda run --no-capture-output -n lumiq \
-  python "${ROOT_DIR}/core/run_api.py" --host "${API_HOST}" --port "${API_PORT}" &
+  python "${ROOT_DIR}/run_api.py" --host "${API_HOST}" --port "${API_PORT}" &
 CORE_PID=$!
 
 echo "[stack] waiting for core api to boot..."

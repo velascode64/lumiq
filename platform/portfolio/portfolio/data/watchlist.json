@@ -1,0 +1,14 @@
+{
+  "groups": {},
+  "favorites": [],
+  "benchmarks": {
+    "stocks": [
+      "SPY",
+      "QQQ"
+    ],
+    "crypto": [
+      "BTC/USD",
+      "ETH/USD"
+    ]
+  }
+}

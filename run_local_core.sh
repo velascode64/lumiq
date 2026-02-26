@@ -2,5 +2,5 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec conda run -n lumiq python "$ROOT_DIR/core/run_api.py" "$@"
+exec conda run -n lumiq python "$ROOT_DIR/run_api.py" "$@"
 
