@@ -22,7 +22,7 @@ def main() -> int:
         "-n",
         "lumiq",
         "python",
-        str(root / "core" / "run_api.py"),
+        str(root / "run_api.py"),
         *sys.argv[1:],
     ]
     return subprocess.call(cmd, cwd=str(root), env=os.environ.copy())

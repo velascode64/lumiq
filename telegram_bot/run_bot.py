@@ -20,7 +20,7 @@ def _load_env() -> None:
     if load_dotenv is None:
         return
     here = Path(__file__).resolve().parent
-    for env_path in (here / ".env", here.parent / "core" / ".env", here.parent / ".env"):
+    for env_path in (here / ".env", here.parent / ".env"):
         if env_path.exists():
             load_dotenv(env_path)
 
