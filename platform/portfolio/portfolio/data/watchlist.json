@@ -1,5 +1,11 @@
 {
-  "groups": {},
+  "groups": {
+    "GOLD": [
+      "GLD",
+      "SLV",
+      "AIU"
+    ]
+  },
   "favorites": [],
   "benchmarks": {
     "stocks": [
