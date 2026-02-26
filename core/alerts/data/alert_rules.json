@@ -22,8 +22,8 @@
       "active": true,
       "chat_id": 8101362735,
       "id": "ETH/USD-1771654676",
-      "last_triggered_at": "2026-02-25T22:18:40.276737+00:00",
-      "reference_price": 2107.6,
+      "last_triggered_at": "2026-02-26T00:09:05.303711+00:00",
+      "reference_price": 2056.86,
       "symbol": "ETH/USD",
       "threshold": 1.0,
       "type": "percent_rise"
@@ -1432,5 +1432,5 @@
     }
   ],
   "schema_version": 1,
-  "updated_at": "2026-02-25T19:01:11.742778"
+  "updated_at": "2026-02-25T21:59:33.180999"
 }

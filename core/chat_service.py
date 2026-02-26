@@ -7,17 +7,21 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 try:
     from .agno_trading_agent import run_agent_message
+    from .agno_live_trading_agent import run_live_trading_message
     from .agno_team_orchestrator import run_team_message
     from .alpaca_pnl import get_pnl_report
     from .alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
 except ImportError:
     from agno_trading_agent import run_agent_message
+    from agno_live_trading_agent import run_live_trading_message
     from agno_team_orchestrator import run_team_message
     from alpaca_pnl import get_pnl_report
     from alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
@@ -118,6 +122,34 @@ class ChatResponse:
 class ChatService:
     def __init__(self, runtime):
         self.runtime = runtime
+        self._chat_trade_mode: Dict[int, str] = {}
+
+    def _get_trade_mode(self, chat_id: int) -> str:
+        return self._chat_trade_mode.get(int(chat_id), "paper")
+
+    def _set_trade_mode(self, chat_id: int, mode: str) -> str:
+        normalized = (mode or "paper").strip().lower()
+        if normalized not in {"paper", "live"}:
+            raise ValueError("mode must be paper or live")
+        self._chat_trade_mode[int(chat_id)] = normalized
+        return normalized
+
+    def _is_trade_intent_text(self, text: str) -> bool:
+        lower = (text or "").lower()
+        hints = ("compra", "compre", "comprar", "buy", "vende", "vender", "sell", "cerrar", "close", "cancelar", "cancel")
+        return any(h in lower for h in hints)
+
+    def _apply_trade_mode_policy(self, chat_id: int, text: str) -> str:
+        if not self._is_trade_intent_text(text):
+            return text
+        mode = self._get_trade_mode(chat_id)
+        return (
+            f"Execution mode policy for this chat: {mode.upper()} only unless changed via /trade_mode. "
+            "Do not ask 'paper or live'. Use the configured mode directly. "
+            "If order type is omitted, default to MARKET. "
+            "If side + symbol + amount/qty are explicit, execute without asking for confirmation.\n"
+            f"User request: {text}"
+        )
 
     def examples_text(self, agent: Optional[str] = None) -> str:
         key = (agent or "all").strip().lower()
@@ -217,8 +249,63 @@ class ChatService:
             "/examples [technicals|alerts|trading]\n"
             "/report <pre_open|midday|close|weekly>\n"
             "/news [watchlist|group <name>]\n"
+            "/trade_mode [paper|live]\n"
+            "/live_trading_options\n"
             "/watchlist [list|groups|add|fav] ...\n"
         )
+
+    def _describe_live_trading_options(self) -> str:
+        team = getattr(self.runtime, "team", None)
+        if team is None:
+            return "Agno Team is not enabled."
+        target_id = "livetradingagent"
+
+        members = list(getattr(team, "members", None) or [])
+        if not members:
+            return "Team has no members loaded."
+
+        selected = None
+        for member in members:
+            name = str(getattr(member, "name", "") or "")
+            if name.lower() == target_id:
+                selected = member
+                break
+            if target_id in {name.lower(), getattr(member, "agent_id", "")}:
+                selected = member
+                break
+
+        if selected is None:
+            available = ", ".join(str(getattr(m, "name", "?")) for m in members)
+            return f"LiveTradingAgent not found in team. Available: {available}"
+
+        name = str(getattr(selected, "name", selected.__class__.__name__))
+        member_id = name.lower()
+        tools = list(getattr(selected, "tools", None) or [])
+        tool_names = []
+        for t in tools:
+            tool_names.append(
+                str(
+                    getattr(t, "name", None)
+                    or getattr(t, "__name__", None)
+                    or t.__class__.__name__
+                )
+            )
+        gateway = getattr(selected, "_live_broker_gateway", None)
+        lines = [
+            "Live Trading Options (Lumibot Broker Tools)",
+            f"- Agent: {name}",
+            f"- Team member ID: {member_id}",
+            f"- Broker gateway attached: {'YES' if gateway is not None else 'NO'}",
+            f"- Local agent tools ({len(tool_names)}): {', '.join(tool_names) if tool_names else 'none'}",
+            "- Supported intents: buy, sell, close position, cancel order(s), account/positions/orders queries",
+            "- Defaults: conversational mode uses /trade_mode setting; order type defaults to MARKET if omitted",
+            "- Fast path: explicit simple market orders (e.g. buy $1000 ETH/USD) bypass LLM tool selection for lower latency",
+        ]
+        if gateway is None:
+            lines.append("- Status: live broker gateway is not attached, so manual broker execution will not run.")
+        else:
+            lines.append("- Status: broker tools are attached. If an order still does not execute, inspect parsing/tool invocation and broker API errors.")
+        return "\n".join(lines)
 
     def get_alerts_summary(self, chat_id: Optional[int] = None) -> str:
         alert_system = self.runtime.alert_system
@@ -494,6 +581,18 @@ class ChatService:
                 return ChatResponse(f"Generando digest de noticias{scope}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
             return ChatResponse("Ya hay un digest de noticias en ejecución.", parse_mode=None)
 
+        if command == "trade_mode":
+            if not args:
+                return ChatResponse(f"Current conversational trade mode: {self._get_trade_mode(chat_id)}", parse_mode=None)
+            try:
+                mode = self._set_trade_mode(chat_id, args[0])
+            except Exception as exc:
+                return ChatResponse(f"Error: {exc}", parse_mode=None)
+            return ChatResponse(f"Conversational trade mode set to {mode}.", parse_mode=None)
+
+        if command in {"live_trading_options", "agent_tools", "tools"}:
+            return ChatResponse(self._describe_live_trading_options(), parse_mode=None)
+
         if command == "watchlist":
             store = getattr(self.runtime, "watchlist_store", None)
             if store is None:
@@ -619,14 +718,37 @@ class ChatService:
             if rsi_response is not None:
                 return ChatResponse(rsi_response, parse_mode=None)
 
+        live_trading_agent = getattr(self.runtime, "live_trading_agent", None)
+        if live_trading_agent is not None and self._is_trade_intent_text(text):
+            session_id = f"telegram-{chat_id}"
+            response = run_live_trading_message(
+                live_trading_agent,
+                text,
+                user_id=str(user_id),
+                session_id=session_id,
+                trade_execution_mode=self._get_trade_mode(chat_id),
+            )
+            return ChatResponse(response, parse_mode=None)
+
         if self.runtime.team is not None:
             session_id = f"telegram-{chat_id}"
-            response = run_team_message(self.runtime.team, text, user_id=str(user_id), session_id=session_id)
+            response = run_team_message(
+                self.runtime.team,
+                self._apply_trade_mode_policy(chat_id, text),
+                user_id=str(user_id),
+                session_id=session_id,
+            )
             return ChatResponse(response, parse_mode=None)
 
         if self.runtime.agent is not None:
             session_id = f"telegram-{chat_id}"
-            response = run_agent_message(self.runtime.agent, text, user_id=str(user_id), session_id=session_id)
+            response = run_agent_message(
+                self.runtime.agent,
+                text,
+                user_id=str(user_id),
+                session_id=session_id,
+                trade_execution_mode=self._get_trade_mode(chat_id),
+            )
             return ChatResponse(response, parse_mode=None)
 
         return ChatResponse("Conversational mode requires OPENAI_API_KEY or ANTHROPIC_API_KEY.", parse_mode=None)

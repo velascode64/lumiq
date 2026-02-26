@@ -17,6 +17,7 @@ import requests
 try:
     from .strategy_orchestrator import StrategyOrchestrator
     from .agno_trading_agent import create_trading_agent
+    from .agno_live_trading_agent import create_live_trading_agent
     from .agno_team_orchestrator import create_alerts_trading_team
     from .alerts.alert_system import AlertSystem
     from .alerts.streaming import AlertStreamManager
@@ -26,6 +27,7 @@ try:
 except ImportError:
     from strategy_orchestrator import StrategyOrchestrator
     from agno_trading_agent import create_trading_agent
+    from agno_live_trading_agent import create_live_trading_agent
     from agno_team_orchestrator import create_alerts_trading_team
     from alerts.alert_system import AlertSystem
     from alerts.streaming import AlertStreamManager
@@ -156,7 +158,7 @@ class CoreRuntime:
             )
         except Exception as exc:
             logger.warning("WatchlistNewsMonitor disabled: %s", exc)
-
+        self.live_trading_agent = create_live_trading_agent(self.orchestrator.broker_config)
         self.agent = create_trading_agent(self.orchestrator)
         self.team = create_alerts_trading_team(self.orchestrator, self.alert_system, self.news_monitor_service)
 

@@ -11,12 +11,15 @@ import json
 import logging
 import time
 import re
+import shlex
+import shutil
 from typing import Any, Dict, List, Optional
 
 import requests
 
 try:
     from .agno_trading_agent import create_trading_agent, run_agent_message
+    from .agno_live_trading_agent import create_live_trading_agent, run_live_trading_message
     from .agno_team_orchestrator import create_alerts_trading_team, run_team_message
     from .strategy_orchestrator import StrategyOrchestrator
     from .alpaca_pnl import get_pnl_report, get_realized_pnl_summary
@@ -27,6 +30,7 @@ try:
     from .agno_news_agent import create_news_agent, run_news_agent_message
 except ImportError:
     from agno_trading_agent import create_trading_agent, run_agent_message
+    from agno_live_trading_agent import create_live_trading_agent, run_live_trading_message
     from agno_team_orchestrator import create_alerts_trading_team, run_team_message
     from strategy_orchestrator import StrategyOrchestrator
     from alpaca_pnl import get_pnl_report, get_realized_pnl_summary
@@ -324,6 +328,7 @@ class TradingTelegramBot:
     def __init__(self, token: str, orchestrator: StrategyOrchestrator):
         self.token = token
         self.orchestrator = orchestrator
+        self._chat_trade_mode: Dict[int, str] = {}
         self.watchlist_store = WatchlistStore()
         self.portfolio_review_service = None
         self.portfolio_review_scheduler = None
@@ -378,6 +383,7 @@ class TradingTelegramBot:
         except Exception as exc:
             logger.warning("WatchlistNewsMonitor disabled: %s", exc)
 
+        self.live_trading_agent = create_live_trading_agent(orchestrator.broker_config)
         self.agent = create_trading_agent(orchestrator)
         self.team = create_alerts_trading_team(orchestrator, self.alert_system, self.news_monitor_service)
         self.base_url = f"https://api.telegram.org/bot{token}"
@@ -450,9 +456,77 @@ class TradingTelegramBot:
             "/examples [technicals|alerts|trading] - example questions by agent\n\n"
             "/report <pre_open|midday|close|weekly> - async report to Telegram\n"
             "/news [watchlist|group <name>] - pre-open news digest (manual fallback)\n"
+            "/trade_mode [paper|live] - default mode for conversational buy/sell\n"
+            "/live_trading_options - inspect LiveTradingAgent broker tools and execution defaults\n"
             "/watchlist [list|groups|add|fav] ...\n\n"
             "You can also send natural language messages to control trading."
         )
+
+    def _get_trade_mode(self, chat_id: int) -> str:
+        return self._chat_trade_mode.get(int(chat_id), "paper")
+
+    def _set_trade_mode(self, chat_id: int, mode: str) -> str:
+        normalized = (mode or "paper").strip().lower()
+        if normalized not in {"paper", "live"}:
+            raise ValueError("mode must be paper or live")
+        self._chat_trade_mode[int(chat_id)] = normalized
+        return normalized
+
+    def _is_trade_intent_text(self, text: str) -> bool:
+        lower = (text or "").lower()
+        hints = ("compra", "compre", "comprar", "buy", "vende", "vender", "sell", "cerrar", "close", "cancelar", "cancel")
+        return any(h in lower for h in hints)
+
+    def _apply_trade_mode_policy(self, chat_id: int, text: str) -> str:
+        if not self._is_trade_intent_text(text):
+            return text
+        mode = self._get_trade_mode(chat_id)
+        return (
+            f"Execution mode policy for this chat: {mode.upper()} only unless changed via /trade_mode. "
+            "Do not ask 'paper or live'. Use the configured mode directly. "
+            "If order type is omitted, default to MARKET. "
+            "If side + symbol + amount/qty are explicit, execute without asking for confirmation.\n"
+            f"User request: {text}"
+        )
+
+    def _describe_live_trading_options(self) -> str:
+        if self.team is None:
+            return "Agno Team is not enabled."
+        target_id = "livetradingagent"
+        members = list(getattr(self.team, "members", None) or [])
+        if not members:
+            return "Team has no members loaded."
+        selected = None
+        for member in members:
+            name = str(getattr(member, "name", "") or "")
+            if name.lower() == target_id:
+                selected = member
+                break
+        if selected is None:
+            available = ", ".join(str(getattr(m, "name", "?")) for m in members)
+            return f"LiveTradingAgent not found in team. Available: {available}"
+        name = str(getattr(selected, "name", selected.__class__.__name__))
+        tools = list(getattr(selected, "tools", None) or [])
+        tool_names = [
+            str(getattr(t, "name", None) or getattr(t, "__name__", None) or t.__class__.__name__)
+            for t in tools
+        ]
+        gateway = getattr(selected, "_live_broker_gateway", None)
+        lines = [
+            "Live Trading Options (Lumibot Broker Tools)",
+            f"- Agent: {name}",
+            f"- Team member ID: {name.lower()}",
+            f"- Broker gateway attached: {'YES' if gateway is not None else 'NO'}",
+            f"- Local agent tools ({len(tool_names)}): {', '.join(tool_names) if tool_names else 'none'}",
+            "- Supported intents: buy, sell, close position, cancel order(s), account/positions/orders queries",
+            "- Defaults: conversational mode uses /trade_mode setting; order type defaults to MARKET if omitted",
+            "- Fast path: explicit simple market orders bypass LLM tool selection for lower latency",
+        ]
+        if gateway is None:
+            lines.append("- Status: live broker gateway is not attached, so manual broker execution will not run.")
+        else:
+            lines.append("- Status: broker tools are attached. If an order still does not execute, inspect parsing/tool invocation and broker API errors.")
+        return "\\n".join(lines)
 
     def get_alerts_summary(self, chat_id: Optional[int] = None) -> str:
         if self.alert_system is None:
@@ -555,6 +629,18 @@ class TradingTelegramBot:
                 scope = f" del grupo {group_name}" if group_name else ""
                 return f"Generando digest de noticias{scope}... te lo envio cuando este listo."
             return "Ya hay un digest de noticias ejecutandose."
+
+        if command == "trade_mode":
+            if not args:
+                return f"Current conversational trade mode: {self._get_trade_mode(chat_id)}"
+            try:
+                mode = self._set_trade_mode(chat_id, args[0])
+            except Exception as exc:
+                return f"Error: {exc}"
+            return f"Conversational trade mode set to {mode}."
+
+        if command in {"live_trading_options", "agent_tools", "tools"}:
+            return self._describe_live_trading_options()
 
         if command == "watchlist":
             action = (args[0].lower() if args else "list")
@@ -698,11 +784,20 @@ class TradingTelegramBot:
             rsi_response = self._maybe_handle_rsi_natural_language(text, chat_id)
             if rsi_response is not None:
                 return rsi_response
+        if self.live_trading_agent is not None and self._is_trade_intent_text(text):
+            session_id = f"telegram-{chat_id}"
+            return run_live_trading_message(
+                self.live_trading_agent,
+                text,
+                user_id=str(user_id),
+                session_id=session_id,
+                trade_execution_mode=self._get_trade_mode(chat_id),
+            )
         if self.team is not None:
             session_id = f"telegram-{chat_id}"
             return run_team_message(
                 self.team,
-                text,
+                self._apply_trade_mode_policy(chat_id, text),
                 user_id=str(user_id),
                 session_id=session_id,
             )
@@ -719,6 +814,7 @@ class TradingTelegramBot:
             text,
             user_id=str(user_id),
             session_id=session_id,
+            trade_execution_mode=self._get_trade_mode(chat_id),
         )
 
     def _maybe_handle_watchlist_natural_language(self, text: str) -> Optional[str]:
