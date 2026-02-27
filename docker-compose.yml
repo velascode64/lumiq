@@ -30,7 +30,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
-    command: ["python", "run_api.py", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["python", "-m", "uvicorn", "lumiq.app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
 
   telegram-bot:
     build:
@@ -43,4 +43,4 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
-    command: ["python", "telegram_bot/run_bot.py"]
+    command: ["python", "-m", "lumiq.telegram_bot.run_bot"]

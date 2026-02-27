@@ -2,13 +2,13 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/opt
 
-WORKDIR /app
+WORKDIR /opt/lumiq
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY requirements.txt /opt/lumiq/requirements.txt
+RUN pip install --no-cache-dir -r /opt/lumiq/requirements.txt
 
-COPY telegram_bot /app/telegram_bot
+COPY . /opt/lumiq
 
-CMD ["python", "telegram_bot/run_bot.py", "--api-base-url", "http://api:8000"]
-
+CMD ["python", "-m", "lumiq.telegram_bot.run_bot", "--api-base-url", "http://api:8000"]
