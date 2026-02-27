@@ -574,7 +574,7 @@ def build_technical_tools(alert_system) -> List[Any]:
         symbol: str,
         percent: float,
         chat_id: Optional[int] = None,
-        cooldown_seconds: int = 300,
+        cooldown_seconds: int = 3600,
     ) -> str:
         """
         Create a percent-drop alert rule (percent points, e.g. 2.0 means 2%).
@@ -602,7 +602,7 @@ def build_technical_tools(alert_system) -> List[Any]:
         symbol: str,
         percent: float,
         chat_id: Optional[int] = None,
-        cooldown_seconds: int = 300,
+        cooldown_seconds: int = 3600,
     ) -> str:
         """
         Create a percent-rise alert rule (percent points, e.g. 2.0 means 2%).
@@ -630,7 +630,7 @@ def build_technical_tools(alert_system) -> List[Any]:
         symbol: str,
         target_price: float,
         chat_id: Optional[int] = None,
-        cooldown_seconds: int = 300,
+        cooldown_seconds: int = 3600,
     ) -> str:
         """
         Create a target-price alert rule.

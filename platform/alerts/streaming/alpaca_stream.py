@@ -178,7 +178,7 @@ class AlertStreamManager:
         rule_id = rule.get("id")
         rule_type = rule.get("type")
         symbol = rule.get("symbol", "")
-        cooldown = int(rule.get("cooldown_seconds") or 300)
+        cooldown = int(rule.get("cooldown_seconds") or 3600)
 
         last_triggered = rule.get("last_triggered_at")
         if last_triggered:

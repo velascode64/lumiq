@@ -12,7 +12,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from lumiq.agents.agno.members.technical_agent import build_technical_tools
 from lumiq.platform.alerts.alert_system import AlertSystem
-from lumiq.platform.db.core import DatabaseManager, alerts_state, sa
+from lumiq.platform.db.core import DatabaseManager, alerts, sa
 from lumiq.platform.db.repositories import DbAlertRulesStoreAdapter
 
 
@@ -72,7 +72,5 @@ def test_technical_agent_alert_crud_tools_persist_to_db(tmp_path: Path):
     assert listed_after["count"] == 0
 
     with manager.connect() as conn:
-        payload = conn.execute(sa.select(alerts_state.c.payload).where(alerts_state.c.id == 1)).scalar_one_or_none()
-    assert isinstance(payload, dict)
-    assert payload.get("rules") == []
-
+        count = conn.execute(sa.select(sa.func.count()).select_from(alerts)).scalar_one()
+    assert int(count) == 0

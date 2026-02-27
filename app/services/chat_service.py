@@ -769,7 +769,7 @@ class ChatService:
                 "threshold": pct,
                 "active": True,
                 "chat_id": int(chat_id),
-                "cooldown_seconds": 300,
+                "cooldown_seconds": 3600,
                 "last_triggered_at": None,
             }
             created = alert_system.add_rule(rule)
@@ -786,7 +786,7 @@ class ChatService:
                 "threshold": pct,
                 "active": True,
                 "chat_id": int(chat_id),
-                "cooldown_seconds": 300,
+                "cooldown_seconds": 3600,
                 "last_triggered_at": None,
             }
             created = alert_system.add_rule(rule)
@@ -806,7 +806,7 @@ class ChatService:
                 "target": target,
                 "active": True,
                 "chat_id": int(chat_id),
-                "cooldown_seconds": 300,
+                "cooldown_seconds": 3600,
                 "last_triggered_at": None,
             }
             created = alert_system.add_rule(rule)

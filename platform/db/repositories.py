@@ -11,7 +11,7 @@ from .core import (
     DatabaseManager,
     sa,
     watchlist_state,
-    alerts_state,
+    alerts,
     agent_messages,
     tasks,
     task_runs,
@@ -173,59 +173,171 @@ class DbWatchlistRepository:
         return {"ticker": ticker, "removed_from_groups": sorted(set(removed_groups)), "removed_from_favorites": removed_fav}
 
 
+def _to_optional_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _to_optional_datetime(value: Any):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+    return None
+
+
 class DbAlertRulesStoreAdapter:
-    """Compatibility adapter that mimics JsonStore(read/write) on top of one JSON SQL table."""
+    """
+    Relational alert rules store.
+
+    Keeps one alert per row in `alerts`. `read`/`write` are retained only as
+    compatibility helpers for code paths that still expect a JsonStore-like API.
+    """
 
     def __init__(self, db: DatabaseManager):
         self.db = db
 
     def read(self) -> Dict[str, Any]:
-        with self.db.connect() as conn:
-            row = conn.execute(sa.select(alerts_state.c.payload, alerts_state.c.updated_at).where(alerts_state.c.id == 1)).mappings().first()
-        if not row:
-            return {"schema_version": 1, "updated_at": _now_iso(), "rules": []}
-        payload = _safe_json(row.get("payload"))
-        payload.setdefault("schema_version", 1)
-        payload.setdefault("updated_at", str(row.get("updated_at") or _now_iso()))
-        payload.setdefault("rules", [])
-        return payload
+        return {
+            "schema_version": 2,
+            "updated_at": _now_iso(),
+            "rules": self.list_rules(),
+        }
 
     def write(self, data: Dict[str, Any]) -> None:
-        payload = dict(data or {})
-        payload.setdefault("schema_version", 1)
-        payload["updated_at"] = _now_iso()
-        now = datetime.now(timezone.utc)
+        desired_rules = list((data or {}).get("rules") or [])
         with self.db.begin() as conn:
-            exists = conn.execute(sa.select(alerts_state.c.id).where(alerts_state.c.id == 1)).scalar_one_or_none()
-            if exists is None:
-                conn.execute(sa.insert(alerts_state).values(id=1, payload=payload, updated_at=now))
-            else:
-                conn.execute(
-                    sa.update(alerts_state)
-                    .where(alerts_state.c.id == 1)
-                    .values(payload=payload, updated_at=now)
-                )
+            conn.execute(sa.delete(alerts))
+            for rule in desired_rules:
+                conn.execute(sa.insert(alerts).values(**self._normalize_rule_for_row(rule)))
 
-    def log_event(self, alert_id: str, symbol: Optional[str], event_type: str, payload: Optional[Dict[str, Any]] = None, message: Optional[str] = None) -> None:
-        try:
-            data = self.read()
-            events = list(data.get("events") or [])
-            events.append(
-                {
-                    "id": _uuid(),
-                    "alert_id": alert_id,
-                    "symbol": symbol or "",
-                    "event_type": event_type,
-                    "payload": payload or {},
-                    "message": message,
-                    "created_at": _now_iso(),
-                }
+    def _row_to_rule(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        params = _safe_json(row.get("params"))
+        last_triggered_at = row.get("last_triggered_at")
+        if last_triggered_at is None:
+            last_triggered_at_value = None
+        elif isinstance(last_triggered_at, str):
+            last_triggered_at_value = last_triggered_at
+        else:
+            try:
+                last_triggered_at_value = last_triggered_at.isoformat()
+            except Exception:
+                last_triggered_at_value = str(last_triggered_at)
+        rule: Dict[str, Any] = {
+            "id": row.get("id"),
+            "chat_id": row.get("chat_id"),
+            "user_id": row.get("user_id"),
+            "symbol": row.get("symbol"),
+            "type": row.get("rule_type"),
+            "active": bool(row.get("active", True)),
+            "cooldown_seconds": int(row.get("cooldown_seconds") or 3600),
+            "last_triggered_at": last_triggered_at_value,
+            "last_triggered_price": _to_optional_float(row.get("last_triggered_price")),
+        }
+        threshold = _to_optional_float(row.get("threshold_pct"))
+        target = _to_optional_float(row.get("target_price"))
+        reference = _to_optional_float(row.get("reference_price"))
+        if threshold is not None:
+            rule["threshold"] = threshold
+        if target is not None:
+            rule["target"] = target
+        if reference is not None:
+            rule["reference_price"] = reference
+        for key, value in params.items():
+            if key not in rule:
+                rule[key] = value
+        return rule
+
+    def _normalize_rule_for_row(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        raw = dict(rule or {})
+        known_keys = {
+            "id",
+            "chat_id",
+            "user_id",
+            "symbol",
+            "type",
+            "active",
+            "cooldown_seconds",
+            "threshold",
+            "target",
+            "reference_price",
+            "last_triggered_at",
+            "last_triggered_price",
+        }
+        params = {k: v for k, v in raw.items() if k not in known_keys and v is not None}
+        return {
+            "id": str(raw.get("id") or _uuid()),
+            "chat_id": int(raw["chat_id"]) if raw.get("chat_id") is not None else None,
+            "user_id": int(raw["user_id"]) if raw.get("user_id") is not None else None,
+            "symbol": str(raw.get("symbol") or "").strip().upper(),
+            "rule_type": str(raw.get("type") or raw.get("rule_type") or "").strip(),
+            "active": bool(raw.get("active", True)),
+            "cooldown_seconds": int(raw.get("cooldown_seconds") or 3600),
+            "threshold_pct": _to_optional_float(raw.get("threshold")),
+            "target_price": _to_optional_float(raw.get("target")),
+            "reference_price": _to_optional_float(raw.get("reference_price")),
+            "last_triggered_price": _to_optional_float(raw.get("last_triggered_price")),
+            "last_triggered_at": _to_optional_datetime(raw.get("last_triggered_at")),
+            "params": params,
+            "updated_at": sa.func.now(),
+        }
+
+    def list_rules(self, *, chat_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        with self.db.connect() as conn:
+            stmt = sa.select(alerts).order_by(alerts.c.created_at.asc())
+            if chat_id is not None:
+                stmt = stmt.where(alerts.c.chat_id == int(chat_id))
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_rule(dict(r)) for r in rows]
+
+    def add_rule(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._normalize_rule_for_row(rule)
+        with self.db.begin() as conn:
+            conn.execute(sa.insert(alerts).values(**row))
+        return self._row_to_rule(row)
+
+    def update_rule(self, rule_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        with self.db.begin() as conn:
+            existing = conn.execute(sa.select(alerts).where(alerts.c.id == str(rule_id))).mappings().first()
+            if not existing:
+                return None
+            current_rule = self._row_to_rule(dict(existing))
+            current_rule.update(dict(updates or {}))
+            row = self._normalize_rule_for_row(current_rule)
+            conn.execute(
+                sa.update(alerts)
+                .where(alerts.c.id == str(rule_id))
+                .values(
+                    chat_id=row["chat_id"],
+                    user_id=row["user_id"],
+                    symbol=row["symbol"],
+                    rule_type=row["rule_type"],
+                    active=row["active"],
+                    cooldown_seconds=row["cooldown_seconds"],
+                    threshold_pct=row["threshold_pct"],
+                    target_price=row["target_price"],
+                    reference_price=row["reference_price"],
+                    last_triggered_price=row["last_triggered_price"],
+                    last_triggered_at=row["last_triggered_at"],
+                    params=row["params"],
+                    updated_at=sa.func.now(),
+                )
             )
-            # keep storage bounded
-            data["events"] = events[-500:]
-            self.write(data)
-        except Exception:
-            logger.exception("Failed to persist alert event")
+        return self._row_to_rule(row)
+
+    def remove_rule(self, rule_id: str) -> bool:
+        with self.db.begin() as conn:
+            result = conn.execute(sa.delete(alerts).where(alerts.c.id == str(rule_id)))
+        return bool(result.rowcount)
 
 
 class DbCoordinationRepository:
