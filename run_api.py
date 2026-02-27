@@ -42,15 +42,18 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
     _load_env()
 
-    # Ensure imports resolve through the `lumiq` package (avoids clashing with the
-    # external `lumibot` package when this script runs from inside `lumiq/`).
+    # Keep import resolution stable across local and container runs.
+    # We avoid putting `script_dir` first in sys.path (to prevent stdlib shadowing
+    # by local modules like `platform/`), but we keep it available for `app.*`.
     script_dir = Path(__file__).resolve().parent
     repo_parent = script_dir.parent
-    # Remove the script directory itself (`.../lumiq`) so local packages like
-    # `platform/` don't shadow Python stdlib modules (e.g. `import platform`).
+    # Remove direct occurrences, then re-add in safe order.
     sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != script_dir]
     if str(repo_parent) not in sys.path:
         sys.path.insert(0, str(repo_parent))
+    # Append (not prepend) so stdlib/module resolution keeps precedence.
+    if str(script_dir) not in sys.path:
+        sys.path.append(str(script_dir))
 
     import uvicorn
     try:
