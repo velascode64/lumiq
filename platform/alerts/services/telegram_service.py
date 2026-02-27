@@ -27,13 +27,32 @@ class TelegramService:
             bot_token: Telegram bot token (defaults to TELEGRAM_TOKEN env var)
             chat_id: Target chat ID (defaults to TELEGRAM_CHAT_ID env var)
         """
-        self.bot_token = bot_token or os.getenv("TELEGRAM_TOKEN", "")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        self.bot_token = (
+            bot_token
+            or os.getenv("TELEGRAM_TOKEN", "").strip()
+            or os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+        )
+        self.chat_id = (
+            chat_id
+            or os.getenv("TELEGRAM_CHAT_ID", "").strip()
+            or self._first_allowed_chat_id()
+        )
 
         if not self.bot_token:
-            logger.warning("TELEGRAM_TOKEN not set - notifications disabled")
+            logger.warning("TELEGRAM token not set (expected TELEGRAM_TOKEN or TELEGRAM_BOT_TOKEN) - notifications disabled")
         if not self.chat_id:
-            logger.warning("TELEGRAM_CHAT_ID not set - notifications disabled")
+            logger.warning("TELEGRAM chat id not set (expected TELEGRAM_CHAT_ID or TELEGRAM_ALLOWED_CHAT_IDS) - notifications disabled")
+
+    @staticmethod
+    def _first_allowed_chat_id() -> str:
+        raw = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", "").strip()
+        if not raw:
+            return ""
+        for token in raw.replace(";", ",").split(","):
+            candidate = token.strip()
+            if candidate:
+                return candidate
+        return ""
 
     @property
     def is_configured(self) -> bool:
