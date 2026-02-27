@@ -9,6 +9,7 @@ while preserving current behavior and CLI flags.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import logging
 import sys
 from pathlib import Path
@@ -56,10 +57,26 @@ def main() -> None:
         sys.path.append(str(script_dir))
 
     import uvicorn
+    create_app = None
     try:
-        from lumiq.app.main import create_app
-    except ImportError:  # pragma: no cover
-        from app.main import create_app
+        from lumiq.app.main import create_app as _create_app
+        create_app = _create_app
+    except Exception:
+        try:
+            from app.main import create_app as _create_app
+            create_app = _create_app
+        except Exception:
+            app_main_path = script_dir / "app" / "main.py"
+            if not app_main_path.exists():
+                raise RuntimeError(f"Unable to locate app entrypoint at {app_main_path}")
+            spec = importlib.util.spec_from_file_location("lumiq_app_main", app_main_path)
+            if spec is None or spec.loader is None:
+                raise RuntimeError(f"Unable to build import spec for {app_main_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            create_app = getattr(module, "create_app", None)
+            if create_app is None:
+                raise RuntimeError(f"create_app not found in {app_main_path}")
 
     app = create_app(strategies_path=args.strategies_path)
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload)
