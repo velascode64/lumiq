@@ -384,12 +384,13 @@ class ChatService:
             "/kill <strategy>\n"
             "/pnl [mode=paper|live]\n"
             "/list alerts\n"
+            "/alerts [list|create-drop|create-rise|create-target|create-rsi-overbought|create-rsi-oversold|pause|resume|remove] ...\n"
             "/examples [technicals|alerts|trading]\n"
             "/report <pre_open|midday|close|weekly>\n"
             "/news [watchlist|group <name>]\n"
             "/trade_mode [paper|live]\n"
             "/live_trading_options\n"
-            "/watchlist [list|groups|add|fav] ...\n"
+            "/watchlist [list|groups|add|create|fav|remove|remove-group] ...\n"
         )
 
     def _describe_live_trading_options(self) -> str:
@@ -1004,6 +1005,156 @@ class ChatService:
         if command in {"live_trading_options", "agent_tools", "tools"}:
             return ChatResponse(self._describe_live_trading_options(), parse_mode=None)
 
+        if command in {"alerts", "alert"}:
+            alert_system = self.runtime.alert_system
+            if alert_system is None:
+                return ChatResponse("Alert system is not available.", parse_mode=None)
+
+            action = (args[0].lower() if args else "list")
+            if action == "list":
+                return ChatResponse(self.get_alerts_summary(chat_id), parse_mode=None)
+
+            if action in {"remove", "delete", "rm"}:
+                if len(args) < 2:
+                    return ChatResponse("Usage: /alerts remove <alert_id>", parse_mode=None)
+                rule_id = args[1].strip()
+                ok = alert_system.remove_rule(rule_id)
+                return ChatResponse(
+                    f"Alert {rule_id} removed." if ok else f"Alert {rule_id} not found.",
+                    parse_mode=None,
+                )
+
+            if action in {"pause", "deactivate", "disable"}:
+                if len(args) < 2:
+                    return ChatResponse("Usage: /alerts pause <alert_id>", parse_mode=None)
+                rule_id = args[1].strip()
+                updated = alert_system.update_rule(rule_id, {"active": False})
+                if updated is None:
+                    return ChatResponse(f"Alert {rule_id} not found.", parse_mode=None)
+                return ChatResponse(f"Alert {rule_id} paused.", parse_mode=None)
+
+            if action in {"resume", "activate", "enable"}:
+                if len(args) < 2:
+                    return ChatResponse("Usage: /alerts resume <alert_id>", parse_mode=None)
+                rule_id = args[1].strip()
+                updated = alert_system.update_rule(rule_id, {"active": True})
+                if updated is None:
+                    return ChatResponse(f"Alert {rule_id} not found.", parse_mode=None)
+                return ChatResponse(f"Alert {rule_id} resumed.", parse_mode=None)
+
+            if action in {"create-drop", "create-rise", "create-target", "create-rsi-overbought", "create-rsi-oversold"}:
+                needs_value = action in {"create-drop", "create-rise", "create-target"}
+                if len(args) < 2 or (needs_value and len(args) < 3):
+                    return ChatResponse(
+                        "Usage: /alerts create-drop <symbol> <percent> | "
+                        "/alerts create-rise <symbol> <percent> | "
+                        "/alerts create-target <symbol> <price> | "
+                        "/alerts create-rsi-overbought <symbol> [threshold=70] [period=14] | "
+                        "/alerts create-rsi-oversold <symbol> [threshold=30] [period=14]",
+                        parse_mode=None,
+                    )
+                symbol = args[1].strip().upper().replace("-", "/")
+                valid_symbols, invalid_symbols = self._validate_watchlist_symbols([symbol])
+                if not valid_symbols:
+                    bad = invalid_symbols[0] if invalid_symbols else symbol
+                    return ChatResponse(f"Invalid symbol: {bad}", parse_mode=None)
+                symbol = valid_symbols[0]
+                suffix = ""
+                if invalid_symbols:
+                    suffix = " | ignored invalid: " + ", ".join(invalid_symbols[:10])
+
+                try:
+                    if action == "create-drop":
+                        pct = float(str(args[2]).replace(",", "."))
+                        rule = {
+                            "id": str(uuid.uuid4()),
+                            "symbol": symbol,
+                            "type": "percent_drop",
+                            "threshold": pct / 100.0,
+                            "active": True,
+                            "chat_id": int(chat_id),
+                            "cooldown_seconds": 3600,
+                            "last_triggered_at": None,
+                        }
+                        created = alert_system.add_rule(rule)
+                        return ChatResponse(
+                            f"Alert created: {created.get('symbol')} drop {pct:.2f}% (id: {created.get('id')})." + suffix,
+                            parse_mode=None,
+                        )
+
+                    if action == "create-rise":
+                        pct = float(str(args[2]).replace(",", "."))
+                        rule = {
+                            "id": str(uuid.uuid4()),
+                            "symbol": symbol,
+                            "type": "percent_rise",
+                            "threshold": pct / 100.0,
+                            "active": True,
+                            "chat_id": int(chat_id),
+                            "cooldown_seconds": 3600,
+                            "last_triggered_at": None,
+                        }
+                        created = alert_system.add_rule(rule)
+                        return ChatResponse(
+                            f"Alert created: {created.get('symbol')} rise {pct:.2f}% (id: {created.get('id')})." + suffix,
+                            parse_mode=None,
+                        )
+
+                    if action == "create-target":
+                        target = float(str(args[2]).replace(",", "."))
+                        rule = {
+                            "id": str(uuid.uuid4()),
+                            "symbol": symbol,
+                            "type": "target_price",
+                            "target": target,
+                            "active": True,
+                            "chat_id": int(chat_id),
+                            "cooldown_seconds": 3600,
+                            "last_triggered_at": None,
+                        }
+                        created = alert_system.add_rule(rule)
+                        return ChatResponse(
+                            f"Alert created: {created.get('symbol')} target ${target:,.2f} (id: {created.get('id')})." + suffix,
+                            parse_mode=None,
+                        )
+
+                    threshold = float(str(args[2]).replace(",", ".")) if len(args) >= 3 else (70.0 if action == "create-rsi-overbought" else 30.0)
+                    period = 14
+                    for token in args[3:]:
+                        token_lower = token.lower()
+                        if token_lower.startswith("period="):
+                            try:
+                                period = int(token_lower.split("=", 1)[1].strip())
+                            except Exception:
+                                pass
+                        elif re.fullmatch(r"\d+", token_lower):
+                            try:
+                                period = int(token_lower)
+                            except Exception:
+                                pass
+                    if action == "create-rsi-overbought":
+                        rule = create_rsi_overbought(symbol, threshold=threshold, period=period)
+                        label = f"RSI>{threshold:.2f}"
+                    else:
+                        rule = create_rsi_oversold(symbol, threshold=threshold, period=period)
+                        label = f"RSI<{threshold:.2f}"
+                    rule["id"] = str(uuid.uuid4())
+                    rule["chat_id"] = int(chat_id)
+                    created = alert_system.add_rule(rule)
+                    return ChatResponse(
+                        f"Alert created: {created.get('symbol')} {label} period={period} (id: {created.get('id')})." + suffix,
+                        parse_mode=None,
+                    )
+                except ValueError as exc:
+                    return ChatResponse(f"Invalid numeric value: {exc}", parse_mode=None)
+                except Exception as exc:
+                    return ChatResponse(f"Failed to create alert: {exc}", parse_mode=None)
+
+            return ChatResponse(
+                "Usage: /alerts [list|create-drop|create-rise|create-target|create-rsi-overbought|create-rsi-oversold|pause|resume|remove] ...",
+                parse_mode=None,
+            )
+
         if command == "watchlist":
             store = getattr(self.runtime, "watchlist_store", None)
             if store is None:
@@ -1011,9 +1162,9 @@ class ChatService:
             action = (args[0].lower() if args else "list")
             if action in {"list", "groups"}:
                 return ChatResponse(store.summary_text(), parse_mode=None)
-            if action in {"add", "fav", "favorite", "remove", "rm", "delete", "remove-group", "rm-group", "delete-group"}:
+            if action in {"add", "create", "fav", "favorite", "remove", "rm", "delete", "remove-group", "rm-group", "delete-group"}:
                 if len(args) < 2:
-                    return ChatResponse("Uso: /watchlist add <ticker> [grupo1,grupo2] | /watchlist fav <ticker> | /watchlist remove <ticker> [grupo|favorites] | /watchlist remove-group <grupo>", parse_mode=None)
+                    return ChatResponse("Uso: /watchlist add <ticker> [grupo1,grupo2] | /watchlist create <ticker> [grupo1,grupo2] | /watchlist fav <ticker> | /watchlist remove <ticker> [grupo|favorites] | /watchlist remove-group <grupo>", parse_mode=None)
                 ticker = args[1]
                 try:
                     if action in {"fav", "favorite"}:
@@ -1036,7 +1187,7 @@ class ChatService:
                     return ChatResponse(f"Watchlist actualizado: {json.dumps(result, ensure_ascii=True)}", parse_mode=None)
                 except Exception as exc:
                     return ChatResponse(f"No se pudo actualizar watchlist: {exc}", parse_mode=None)
-            return ChatResponse("Uso: /watchlist [list|groups|add|fav|remove|remove-group] ...", parse_mode=None)
+            return ChatResponse("Uso: /watchlist [list|groups|add|create|fav|remove|remove-group] ...", parse_mode=None)
 
         if command == "strategies":
             available = orchestrator.list_available_strategies()
