@@ -10,8 +10,8 @@ from .core import (
     SQLALCHEMY_AVAILABLE,
     DatabaseManager,
     sa,
-    watchlist_state,
-    alerts_state,
+    watchlist_groups,
+    alerts,
     agent_messages,
     tasks,
     task_runs,
@@ -55,177 +55,431 @@ class DbWatchlistRepository:
     def __init__(self, db: DatabaseManager):
         self.db = db
 
-    def _default_payload(self) -> Dict[str, Any]:
+    def _default_benchmarks(self) -> Dict[str, Any]:
+        return {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]}
+
+    def _normalize_group_name(self, value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _normalize_symbol(self, value: Any) -> str:
+        sym = str(value or "").strip().upper()
+        if not sym:
+            return ""
+        if "/" in sym:
+            return sym.replace("-", "/")
+        if "-" in sym and len(sym) <= 12:
+            return sym.replace("-", "/")
+        return sym
+
+    def _normalize_tickers(self, tickers: Iterable[Any]) -> List[str]:
+        seen: set[str] = set()
+        out: List[str] = []
+        for item in tickers or []:
+            sym = self._normalize_symbol(item)
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
+        return out
+
+    def _safe_json_list(self, value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if value in (None, ""):
+            return []
+        try:
+            if isinstance(value, str):
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+        return []
+
+    def _read_groups(self) -> List[Dict[str, Any]]:
+        with self.db.connect() as conn:
+            rows = conn.execute(sa.select(watchlist_groups).order_by(watchlist_groups.c.created_at.asc())).mappings().all()
+        return [dict(row) for row in rows]
+
+    def _find_existing_group_id(
+        self,
+        conn,
+        *,
+        name: str,
+        chat_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ) -> Optional[str]:
+        stmt = sa.select(watchlist_groups.c.id).where(watchlist_groups.c.name == self._normalize_group_name(name))
+        if chat_id is None:
+            stmt = stmt.where(watchlist_groups.c.chat_id.is_(None))
+        else:
+            stmt = stmt.where(watchlist_groups.c.chat_id == int(chat_id))
+        if user_id is None:
+            stmt = stmt.where(watchlist_groups.c.user_id.is_(None))
+        else:
+            stmt = stmt.where(watchlist_groups.c.user_id == int(user_id))
+        return conn.execute(stmt).scalar_one_or_none()
+
+    def _upsert_group_row(
+        self,
+        *,
+        name: str,
+        tickers: Iterable[Any],
+        kind: str = "custom",
+        benchmarks: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_name = self._normalize_group_name(name)
+        if not normalized_name:
+            raise ValueError("group name is required")
+        normalized_tickers = self._normalize_tickers(tickers)
+        persisted_id: Optional[str] = None
+        with self.db.begin() as conn:
+            exists = self._find_existing_group_id(conn, name=normalized_name)
+            values = {
+                "name": normalized_name,
+                "kind": str(kind or "custom").strip().lower(),
+                "tickers": normalized_tickers,
+                "benchmarks": benchmarks if isinstance(benchmarks, dict) else {},
+                "meta": meta if isinstance(meta, dict) else {},
+                "updated_at": sa.func.now(),
+            }
+            if exists is None:
+                persisted_id = _uuid()
+                conn.execute(
+                    sa.insert(watchlist_groups).values(
+                        id=persisted_id,
+                        created_at=sa.func.now(),
+                        **values,
+                    )
+                )
+            else:
+                persisted_id = str(exists)
+                conn.execute(
+                    sa.update(watchlist_groups)
+                    .where(watchlist_groups.c.id == exists)
+                    .values(**values)
+                )
         return {
-            "groups": {},
-            "favorites": [],
-            "benchmarks": {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]},
-            "updated_at": _now_iso(),
-            "schema_version": 1,
+            "id": persisted_id or "",
+            "name": normalized_name,
+            "kind": str(kind or "custom").strip().lower(),
+            "tickers": normalized_tickers,
+            "benchmarks": benchmarks if isinstance(benchmarks, dict) else {},
+            "meta": meta if isinstance(meta, dict) else {},
         }
 
-    def _read_payload(self) -> Dict[str, Any]:
-        with self.db.connect() as conn:
-            row = conn.execute(sa.select(watchlist_state.c.payload).where(watchlist_state.c.id == 1)).scalar_one_or_none()
-        payload = _safe_json(row)
-        if not payload:
-            payload = self._default_payload()
-        payload.setdefault("groups", {})
-        payload.setdefault("favorites", [])
-        payload.setdefault("benchmarks", {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]})
-        payload.setdefault("schema_version", 1)
-        return payload
-
-    def _write_payload(self, payload: Dict[str, Any]) -> None:
-        to_save = dict(payload or {})
-        to_save["updated_at"] = _now_iso()
-        to_save.setdefault("schema_version", 1)
-        with self.db.begin() as conn:
-            exists = conn.execute(sa.select(watchlist_state.c.id).where(watchlist_state.c.id == 1)).scalar_one_or_none()
-            if exists is None:
-                conn.execute(sa.insert(watchlist_state).values(id=1, payload=to_save, updated_at=sa.func.now()))
-            else:
-                conn.execute(
-                    sa.update(watchlist_state)
-                    .where(watchlist_state.c.id == 1)
-                    .values(payload=to_save, updated_at=sa.func.now())
-                )
-
     def load_config_dict(self) -> Dict[str, Any]:
-        payload = self._read_payload()
+        rows = self._read_groups()
+        groups: Dict[str, List[str]] = {}
+        favorites: List[str] = []
+        benchmarks = self._default_benchmarks()
+        for row in rows:
+            name = self._normalize_group_name(row.get("name"))
+            tickers = self._normalize_tickers(self._safe_json_list(row.get("tickers")))
+            kind = str(row.get("kind") or "custom").strip().lower()
+            if not name:
+                continue
+            if name == "favorites" or kind == "favorites":
+                favorites = tickers
+                row_bench = _safe_json(row.get("benchmarks"))
+                if row_bench:
+                    benchmarks = row_bench
+                continue
+            groups[name] = tickers
         return {
-            "groups": payload.get("groups") or {},
-            "favorites": payload.get("favorites") or [],
-            "benchmarks": payload.get("benchmarks") or {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]},
+            "groups": groups,
+            "favorites": favorites,
+            "benchmarks": benchmarks,
         }
 
     def save_config_dict(self, payload: Dict[str, Any]) -> None:
-        base = self._read_payload()
-        base["groups"] = payload.get("groups") or {}
-        base["favorites"] = payload.get("favorites") or []
-        base["benchmarks"] = payload.get("benchmarks") or {}
-        self._write_payload(base)
+        groups = dict((payload or {}).get("groups") or {})
+        favorites = self._normalize_tickers((payload or {}).get("favorites") or [])
+        benchmarks = _safe_json((payload or {}).get("benchmarks")) or self._default_benchmarks()
+        desired_names = {self._normalize_group_name(name) for name in groups.keys()}
+        if favorites:
+            desired_names.add("favorites")
+        with self.db.begin() as conn:
+            existing = conn.execute(sa.select(watchlist_groups.c.id, watchlist_groups.c.name)).mappings().all()
+            for row in existing:
+                row_name = self._normalize_group_name(row.get("name"))
+                if row_name not in desired_names:
+                    conn.execute(sa.delete(watchlist_groups).where(watchlist_groups.c.id == row["id"]))
+            for name, tickers in groups.items():
+                normalized_name = self._normalize_group_name(name)
+                if not normalized_name:
+                    continue
+                values = {
+                    "name": normalized_name,
+                    "kind": "custom",
+                    "tickers": self._normalize_tickers(tickers or []),
+                    "benchmarks": {},
+                    "meta": {},
+                    "updated_at": sa.func.now(),
+                }
+                exists = self._find_existing_group_id(conn, name=normalized_name)
+                if exists is None:
+                    conn.execute(sa.insert(watchlist_groups).values(id=_uuid(), created_at=sa.func.now(), **values))
+                else:
+                    conn.execute(sa.update(watchlist_groups).where(watchlist_groups.c.id == exists).values(**values))
+            if favorites:
+                values = {
+                    "name": "favorites",
+                    "kind": "favorites",
+                    "tickers": favorites,
+                    "benchmarks": benchmarks,
+                    "meta": {},
+                    "updated_at": sa.func.now(),
+                }
+                exists = self._find_existing_group_id(conn, name="favorites")
+                if exists is None:
+                    conn.execute(sa.insert(watchlist_groups).values(id=_uuid(), created_at=sa.func.now(), **values))
+                else:
+                    conn.execute(sa.update(watchlist_groups).where(watchlist_groups.c.id == exists).values(**values))
 
     def upsert_ticker(self, ticker: str, groups: Iterable[str], favorite: bool = False) -> Dict[str, Any]:
-        payload = self._read_payload()
-        all_groups: Dict[str, List[str]] = payload.get("groups") or {}
-        favorites: List[str] = list(payload.get("favorites") or [])
+        sym = self._normalize_symbol(ticker)
+        if not sym:
+            raise ValueError("ticker is required")
+        cfg = self.load_config_dict()
+        all_groups: Dict[str, List[str]] = dict(cfg.get("groups") or {})
+        favorites: List[str] = list(cfg.get("favorites") or [])
+        benchmarks = _safe_json(cfg.get("benchmarks")) or self._default_benchmarks()
         assigned: List[str] = []
         for g in groups:
-            gname = str(g).strip().lower()
+            gname = self._normalize_group_name(g)
             if not gname:
                 continue
             bucket = list(all_groups.get(gname) or [])
-            if ticker not in bucket:
-                bucket.append(ticker)
+            if sym not in bucket:
+                bucket.append(sym)
             all_groups[gname] = bucket
             assigned.append(gname)
-        if favorite and ticker not in favorites:
-            favorites.append(ticker)
-        if "favorites" in assigned and ticker not in favorites:
-            favorites.append(ticker)
-        payload["groups"] = all_groups
-        payload["favorites"] = favorites
-        self._write_payload(payload)
-        return {"ticker": ticker, "groups": assigned, "favorite": favorite or ("favorites" in assigned)}
+        if favorite and sym not in favorites:
+            favorites.append(sym)
+        if "favorites" in assigned and sym not in favorites:
+            favorites.append(sym)
+        self.save_config_dict({"groups": all_groups, "favorites": favorites, "benchmarks": benchmarks})
+        return {"ticker": sym, "groups": assigned, "favorite": favorite or ("favorites" in assigned)}
 
     def remove_group(self, group_name: str) -> Dict[str, Any]:
-        gname = str(group_name).strip().lower()
-        payload = self._read_payload()
-        groups = payload.get("groups") or {}
-        existed = gname in groups
-        removed = list(groups.pop(gname, [])) if existed else []
-        payload["groups"] = groups
-        self._write_payload(payload)
+        gname = self._normalize_group_name(group_name)
+        if not gname:
+            return {"group": gname, "removed_group": False, "tickers_removed_count": 0}
+        cfg = self.load_config_dict()
+        groups = dict(cfg.get("groups") or {})
+        favorites = list(cfg.get("favorites") or [])
+        benchmarks = _safe_json(cfg.get("benchmarks")) or self._default_benchmarks()
+        existed = False
+        removed: List[str] = []
+        if gname == "favorites":
+            existed = bool(favorites)
+            removed = list(favorites)
+            favorites = []
+        elif gname in groups:
+            existed = True
+            removed = list(groups.pop(gname, []))
+        self.save_config_dict({"groups": groups, "favorites": favorites, "benchmarks": benchmarks})
         removed_count = len(removed)
         return {"group": gname, "removed_group": existed, "tickers_removed_count": removed_count}
 
     def remove_ticker(self, ticker: str, group_name: Optional[str] = None, from_favorites: bool = False) -> Dict[str, Any]:
-        payload = self._read_payload()
-        groups = payload.get("groups") or {}
-        favorites = list(payload.get("favorites") or [])
+        sym = self._normalize_symbol(ticker)
+        cfg = self.load_config_dict()
+        groups = dict(cfg.get("groups") or {})
+        favorites = list(cfg.get("favorites") or [])
+        benchmarks = _safe_json(cfg.get("benchmarks")) or self._default_benchmarks()
         removed_groups: List[str] = []
         removed_fav = False
         if group_name:
-            gname = str(group_name).strip().lower()
+            gname = self._normalize_group_name(group_name)
             current = list(groups.get(gname) or [])
-            if ticker in current:
-                groups[gname] = [t for t in current if t != ticker]
+            if sym in current:
+                groups[gname] = [t for t in current if t != sym]
                 if not groups[gname]:
                     groups.pop(gname, None)
                 removed_groups.append(gname)
         else:
             for gname, current in list(groups.items()):
-                if ticker in current:
-                    groups[gname] = [t for t in current if t != ticker]
+                if sym in current:
+                    groups[gname] = [t for t in current if t != sym]
                     if not groups[gname]:
                         groups.pop(gname, None)
                     removed_groups.append(gname)
 
         if from_favorites or (group_name and str(group_name).strip().lower() == "favorites"):
-            if ticker in favorites:
-                favorites = [t for t in favorites if t != ticker]
+            if sym in favorites:
+                favorites = [t for t in favorites if t != sym]
                 removed_fav = True
 
-        payload["groups"] = groups
-        payload["favorites"] = favorites
-        self._write_payload(payload)
-        return {"ticker": ticker, "removed_from_groups": sorted(set(removed_groups)), "removed_from_favorites": removed_fav}
+        self.save_config_dict({"groups": groups, "favorites": favorites, "benchmarks": benchmarks})
+        return {"ticker": sym, "removed_from_groups": sorted(set(removed_groups)), "removed_from_favorites": removed_fav}
+
+
+def _to_optional_float(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _to_optional_datetime(value: Any):
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+    return None
 
 
 class DbAlertRulesStoreAdapter:
-    """Compatibility adapter that mimics JsonStore(read/write) on top of one JSON SQL table."""
+    """
+    Relational alert rules store.
+
+    Keeps one alert per row in `alerts`. `read`/`write` are retained only as
+    compatibility helpers for code paths that still expect a JsonStore-like API.
+    """
 
     def __init__(self, db: DatabaseManager):
         self.db = db
 
     def read(self) -> Dict[str, Any]:
-        with self.db.connect() as conn:
-            row = conn.execute(sa.select(alerts_state.c.payload, alerts_state.c.updated_at).where(alerts_state.c.id == 1)).mappings().first()
-        if not row:
-            return {"schema_version": 1, "updated_at": _now_iso(), "rules": []}
-        payload = _safe_json(row.get("payload"))
-        payload.setdefault("schema_version", 1)
-        payload.setdefault("updated_at", str(row.get("updated_at") or _now_iso()))
-        payload.setdefault("rules", [])
-        return payload
+        return {
+            "schema_version": 2,
+            "updated_at": _now_iso(),
+            "rules": self.list_rules(),
+        }
 
     def write(self, data: Dict[str, Any]) -> None:
-        payload = dict(data or {})
-        payload.setdefault("schema_version", 1)
-        payload["updated_at"] = _now_iso()
-        now = datetime.now(timezone.utc)
+        desired_rules = list((data or {}).get("rules") or [])
         with self.db.begin() as conn:
-            exists = conn.execute(sa.select(alerts_state.c.id).where(alerts_state.c.id == 1)).scalar_one_or_none()
-            if exists is None:
-                conn.execute(sa.insert(alerts_state).values(id=1, payload=payload, updated_at=now))
-            else:
-                conn.execute(
-                    sa.update(alerts_state)
-                    .where(alerts_state.c.id == 1)
-                    .values(payload=payload, updated_at=now)
-                )
+            conn.execute(sa.delete(alerts))
+            for rule in desired_rules:
+                conn.execute(sa.insert(alerts).values(**self._normalize_rule_for_row(rule)))
 
-    def log_event(self, alert_id: str, symbol: Optional[str], event_type: str, payload: Optional[Dict[str, Any]] = None, message: Optional[str] = None) -> None:
-        try:
-            data = self.read()
-            events = list(data.get("events") or [])
-            events.append(
-                {
-                    "id": _uuid(),
-                    "alert_id": alert_id,
-                    "symbol": symbol or "",
-                    "event_type": event_type,
-                    "payload": payload or {},
-                    "message": message,
-                    "created_at": _now_iso(),
-                }
+    def _row_to_rule(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        params = _safe_json(row.get("params"))
+        last_triggered_at = row.get("last_triggered_at")
+        if last_triggered_at is None:
+            last_triggered_at_value = None
+        elif isinstance(last_triggered_at, str):
+            last_triggered_at_value = last_triggered_at
+        else:
+            try:
+                last_triggered_at_value = last_triggered_at.isoformat()
+            except Exception:
+                last_triggered_at_value = str(last_triggered_at)
+        rule: Dict[str, Any] = {
+            "id": row.get("id"),
+            "chat_id": row.get("chat_id"),
+            "user_id": row.get("user_id"),
+            "symbol": row.get("symbol"),
+            "type": row.get("rule_type"),
+            "active": bool(row.get("active", True)),
+            "cooldown_seconds": int(row.get("cooldown_seconds") or 3600),
+            "last_triggered_at": last_triggered_at_value,
+            "last_triggered_price": _to_optional_float(row.get("last_triggered_price")),
+        }
+        threshold = _to_optional_float(row.get("threshold_pct"))
+        target = _to_optional_float(row.get("target_price"))
+        reference = _to_optional_float(row.get("reference_price"))
+        if threshold is not None:
+            rule["threshold"] = threshold
+        if target is not None:
+            rule["target"] = target
+        if reference is not None:
+            rule["reference_price"] = reference
+        for key, value in params.items():
+            if key not in rule:
+                rule[key] = value
+        return rule
+
+    def _normalize_rule_for_row(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        raw = dict(rule or {})
+        known_keys = {
+            "id",
+            "chat_id",
+            "user_id",
+            "symbol",
+            "type",
+            "active",
+            "cooldown_seconds",
+            "threshold",
+            "target",
+            "reference_price",
+            "last_triggered_at",
+            "last_triggered_price",
+        }
+        params = {k: v for k, v in raw.items() if k not in known_keys and v is not None}
+        return {
+            "id": str(raw.get("id") or _uuid()),
+            "chat_id": int(raw["chat_id"]) if raw.get("chat_id") is not None else None,
+            "user_id": int(raw["user_id"]) if raw.get("user_id") is not None else None,
+            "symbol": str(raw.get("symbol") or "").strip().upper(),
+            "rule_type": str(raw.get("type") or raw.get("rule_type") or "").strip(),
+            "active": bool(raw.get("active", True)),
+            "cooldown_seconds": int(raw.get("cooldown_seconds") or 3600),
+            "threshold_pct": _to_optional_float(raw.get("threshold")),
+            "target_price": _to_optional_float(raw.get("target")),
+            "reference_price": _to_optional_float(raw.get("reference_price")),
+            "last_triggered_price": _to_optional_float(raw.get("last_triggered_price")),
+            "last_triggered_at": _to_optional_datetime(raw.get("last_triggered_at")),
+            "params": params,
+            "updated_at": sa.func.now(),
+        }
+
+    def list_rules(self, *, chat_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        with self.db.connect() as conn:
+            stmt = sa.select(alerts).order_by(alerts.c.created_at.asc())
+            if chat_id is not None:
+                stmt = stmt.where(alerts.c.chat_id == int(chat_id))
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_rule(dict(r)) for r in rows]
+
+    def add_rule(self, rule: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._normalize_rule_for_row(rule)
+        with self.db.begin() as conn:
+            conn.execute(sa.insert(alerts).values(**row))
+        return self._row_to_rule(row)
+
+    def update_rule(self, rule_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        with self.db.begin() as conn:
+            existing = conn.execute(sa.select(alerts).where(alerts.c.id == str(rule_id))).mappings().first()
+            if not existing:
+                return None
+            current_rule = self._row_to_rule(dict(existing))
+            current_rule.update(dict(updates or {}))
+            row = self._normalize_rule_for_row(current_rule)
+            conn.execute(
+                sa.update(alerts)
+                .where(alerts.c.id == str(rule_id))
+                .values(
+                    chat_id=row["chat_id"],
+                    user_id=row["user_id"],
+                    symbol=row["symbol"],
+                    rule_type=row["rule_type"],
+                    active=row["active"],
+                    cooldown_seconds=row["cooldown_seconds"],
+                    threshold_pct=row["threshold_pct"],
+                    target_price=row["target_price"],
+                    reference_price=row["reference_price"],
+                    last_triggered_price=row["last_triggered_price"],
+                    last_triggered_at=row["last_triggered_at"],
+                    params=row["params"],
+                    updated_at=sa.func.now(),
+                )
             )
-            # keep storage bounded
-            data["events"] = events[-500:]
-            self.write(data)
-        except Exception:
-            logger.exception("Failed to persist alert event")
+        return self._row_to_rule(row)
+
+    def remove_rule(self, rule_id: str) -> bool:
+        with self.db.begin() as conn:
+            result = conn.execute(sa.delete(alerts).where(alerts.c.id == str(rule_id)))
+        return bool(result.rowcount)
 
 
 class DbCoordinationRepository:

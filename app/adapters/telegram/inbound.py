@@ -7,12 +7,15 @@ python-telegram-bot in some Python versions.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import logging
 import time
 import re
 import shlex
 import shutil
+import threading
+import uuid
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -439,6 +442,29 @@ class TradingTelegramBot:
                 else:
                     raise
 
+    def _send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        try:
+            self._api_post("sendChatAction", {"chat_id": chat_id, "action": action})
+        except Exception:
+            logger.debug("Failed to send chat action", exc_info=True)
+
+    @contextmanager
+    def _typing_indicator(self, chat_id: int):
+        stop_event = threading.Event()
+
+        def _worker() -> None:
+            while not stop_event.is_set():
+                self._send_chat_action(chat_id, action="typing")
+                stop_event.wait(4.0)
+
+        thread = threading.Thread(target=_worker, name=f"telegram-typing-{chat_id}", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop_event.set()
+            thread.join(timeout=1.0)
+
     def _help_text(self) -> str:
         mode_text = "Conversational Agno mode: ON" if self.agent else "Conversational Agno mode: OFF"
         return (
@@ -452,13 +478,14 @@ class TradingTelegramBot:
             "/set <strategy> <param> <value>\n"
             "/stop [strategy|all]\n\n"
             "/pnl [mode=paper|live] - P&L report (daily, weekly, all-time)\n\n"
-            "/list alerts - list active alert rules\n\n"
+            "/list alerts - list active alert rules\n"
+            "/alerts [list|create-drop|create-rise|create-target|create-rsi-overbought|create-rsi-oversold|pause|resume|remove] ...\n\n"
             "/examples [technicals|alerts|trading] - example questions by agent\n\n"
             "/report <pre_open|midday|close|weekly> - async report to Telegram\n"
             "/news [watchlist|group <name>] - pre-open news digest (manual fallback)\n"
             "/trade_mode [paper|live] - default mode for conversational buy/sell\n"
             "/live_trading_options - inspect LiveTradingAgent broker tools and execution defaults\n"
-            "/watchlist [list|groups|add|fav] ...\n\n"
+            "/watchlist [list|groups|add|create|fav|remove|remove-group] ...\n\n"
             "You can also send natural language messages to control trading."
         )
 
@@ -642,13 +669,121 @@ class TradingTelegramBot:
         if command in {"live_trading_options", "agent_tools", "tools"}:
             return self._describe_live_trading_options()
 
+        if command in {"alerts", "alert"}:
+            if self.alert_system is None:
+                return "Alert system is not available."
+            action = (args[0].lower() if args else "list")
+            if action == "list":
+                return self.get_alerts_summary(chat_id=chat_id)
+            if action in {"remove", "delete", "rm"}:
+                if len(args) < 2:
+                    return "Usage: /alerts remove <alert_id>"
+                rule_id = args[1].strip()
+                ok = self.alert_system.remove_rule(rule_id)
+                return f"Alert {rule_id} removed." if ok else f"Alert {rule_id} not found."
+            if action in {"pause", "deactivate", "disable"}:
+                if len(args) < 2:
+                    return "Usage: /alerts pause <alert_id>"
+                rule_id = args[1].strip()
+                updated = self.alert_system.update_rule(rule_id, {"active": False})
+                return f"Alert {rule_id} paused." if updated is not None else f"Alert {rule_id} not found."
+            if action in {"resume", "activate", "enable"}:
+                if len(args) < 2:
+                    return "Usage: /alerts resume <alert_id>"
+                rule_id = args[1].strip()
+                updated = self.alert_system.update_rule(rule_id, {"active": True})
+                return f"Alert {rule_id} resumed." if updated is not None else f"Alert {rule_id} not found."
+            if action in {"create-drop", "create-rise", "create-target", "create-rsi-overbought", "create-rsi-oversold"}:
+                needs_value = action in {"create-drop", "create-rise", "create-target"}
+                if len(args) < 2 or (needs_value and len(args) < 3):
+                    return (
+                        "Usage: /alerts create-drop <symbol> <percent> | "
+                        "/alerts create-rise <symbol> <percent> | "
+                        "/alerts create-target <symbol> <price> | "
+                        "/alerts create-rsi-overbought <symbol> [threshold=70] [period=14] | "
+                        "/alerts create-rsi-oversold <symbol> [threshold=30] [period=14]"
+                    )
+                symbol = args[1].strip().upper().replace("-", "/")
+                try:
+                    if action == "create-drop":
+                        pct = float(str(args[2]).replace(",", "."))
+                        rule = {
+                            "id": str(uuid.uuid4()),
+                            "symbol": symbol,
+                            "type": "percent_drop",
+                            "threshold": pct / 100.0,
+                            "active": True,
+                            "chat_id": int(chat_id),
+                            "cooldown_seconds": 3600,
+                            "last_triggered_at": None,
+                        }
+                        created = self.alert_system.add_rule(rule)
+                        return f"Alert created: {created.get('symbol')} drop {pct:.2f}% (id: {created.get('id')})."
+                    if action == "create-rise":
+                        pct = float(str(args[2]).replace(",", "."))
+                        rule = {
+                            "id": str(uuid.uuid4()),
+                            "symbol": symbol,
+                            "type": "percent_rise",
+                            "threshold": pct / 100.0,
+                            "active": True,
+                            "chat_id": int(chat_id),
+                            "cooldown_seconds": 3600,
+                            "last_triggered_at": None,
+                        }
+                        created = self.alert_system.add_rule(rule)
+                        return f"Alert created: {created.get('symbol')} rise {pct:.2f}% (id: {created.get('id')})."
+                    if action == "create-target":
+                        target = float(str(args[2]).replace(",", "."))
+                        rule = {
+                            "id": str(uuid.uuid4()),
+                            "symbol": symbol,
+                            "type": "target_price",
+                            "target": target,
+                            "active": True,
+                            "chat_id": int(chat_id),
+                            "cooldown_seconds": 3600,
+                            "last_triggered_at": None,
+                        }
+                        created = self.alert_system.add_rule(rule)
+                        return f"Alert created: {created.get('symbol')} target ${target:,.2f} (id: {created.get('id')})."
+                    threshold = float(str(args[2]).replace(",", ".")) if len(args) >= 3 else (70.0 if action == "create-rsi-overbought" else 30.0)
+                    period = 14
+                    for token in args[3:]:
+                        token_lower = token.lower()
+                        if token_lower.startswith("period="):
+                            try:
+                                period = int(token_lower.split("=", 1)[1].strip())
+                            except Exception:
+                                pass
+                        elif re.fullmatch(r"\d+", token_lower):
+                            try:
+                                period = int(token_lower)
+                            except Exception:
+                                pass
+                    if action == "create-rsi-overbought":
+                        rule = create_rsi_overbought(symbol, threshold=threshold, period=period)
+                        label = f"RSI>{threshold:.2f}"
+                    else:
+                        rule = create_rsi_oversold(symbol, threshold=threshold, period=period)
+                        label = f"RSI<{threshold:.2f}"
+                    rule["id"] = str(uuid.uuid4())
+                    rule["chat_id"] = int(chat_id)
+                    created = self.alert_system.add_rule(rule)
+                    return f"Alert created: {created.get('symbol')} {label} period={period} (id: {created.get('id')})."
+                except ValueError as exc:
+                    return f"Invalid numeric value: {exc}"
+                except Exception as exc:
+                    return f"Failed to create alert: {exc}"
+            return "Usage: /alerts [list|create-drop|create-rise|create-target|create-rsi-overbought|create-rsi-oversold|pause|resume|remove] ..."
+
         if command == "watchlist":
             action = (args[0].lower() if args else "list")
             if action in {"list", "groups"}:
                 return self.watchlist_store.summary_text()
-            if action in {"add", "fav", "favorite", "remove", "rm", "delete", "remove-group", "rm-group", "delete-group"}:
+            if action in {"add", "create", "fav", "favorite", "remove", "rm", "delete", "remove-group", "rm-group", "delete-group"}:
                 if len(args) < 2:
-                    return "Uso: /watchlist add <ticker> [grupo1,grupo2] [favorite=true] | /watchlist fav <ticker> | /watchlist remove <ticker> [grupo|favorites] | /watchlist remove-group <grupo>"
+                    return "Uso: /watchlist add <ticker> [grupo1,grupo2] [favorite=true] | /watchlist create <ticker> [grupo1,grupo2] | /watchlist fav <ticker> | /watchlist remove <ticker> [grupo|favorites] | /watchlist remove-group <grupo>"
                 ticker = args[1]
                 try:
                     if action in {"fav", "favorite"}:
@@ -666,7 +801,7 @@ class TradingTelegramBot:
                     return "Watchlist actualizado: " + json.dumps(result, ensure_ascii=True)
                 except Exception as exc:
                     return f"No se pudo actualizar watchlist: {exc}"
-            return "Uso: /watchlist [list|groups|add|fav|remove|remove-group] ..."
+            return "Uso: /watchlist [list|groups|add|create|fav|remove|remove-group] ..."
 
         if command == "strategies":
             available = self.orchestrator.list_available_strategies()
@@ -1082,16 +1217,17 @@ class TradingTelegramBot:
             return
 
         try:
-            if text.startswith("/"):
-                tokens = text.split()
-                raw_command = tokens[0][1:]
-                command = raw_command.split("@", 1)[0].lower()
-                args = tokens[1:]
-                response = self._handle_command(chat_id, user_id, command, args)
-                parse_mode = "HTML"
-            else:
-                response = self._handle_chat(chat_id, user_id, text)
-                parse_mode = None
+            with self._typing_indicator(int(chat_id)):
+                if text.startswith("/"):
+                    tokens = text.split()
+                    raw_command = tokens[0][1:]
+                    command = raw_command.split("@", 1)[0].lower()
+                    args = tokens[1:]
+                    response = self._handle_command(chat_id, user_id, command, args)
+                    parse_mode = "HTML"
+                else:
+                    response = self._handle_chat(chat_id, user_id, text)
+                    parse_mode = None
             self._send_message(chat_id, response, parse_mode=parse_mode)
         except Exception as exc:
             logger.exception("Error handling update: %s", exc)

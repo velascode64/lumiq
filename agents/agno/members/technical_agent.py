@@ -119,20 +119,14 @@ def _episode_starts(mask: pd.Series) -> List[int]:
 
 
 def _rsi_series(prices: pd.Series, period: int = 14) -> pd.Series:
-    delta = prices.diff()
-    gains = delta.where(delta > 0, 0.0)
-    losses = (-delta).where(delta < 0, 0.0)
-    avg_gain = gains.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = losses.ewm(alpha=1 / period, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    both_zero = avg_loss.eq(0) & avg_gain.eq(0)
-    only_loss_zero = avg_loss.eq(0) & ~both_zero
-    only_gain_zero = avg_gain.eq(0) & ~both_zero
-    rsi = rsi.mask(only_loss_zero, 100.0)
-    rsi = rsi.mask(only_gain_zero, 0.0)
-    rsi = rsi.mask(both_zero, 50.0)
-    return rsi.clip(lower=0, upper=100)
+    try:
+        from ta.momentum import RSIIndicator
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError(
+            "The `ta` library is required for RSI analysis. Install dependencies from `lumiq/requirements.txt`."
+        ) from exc
+    indicator = RSIIndicator(close=prices.astype(float), window=max(2, int(period)))
+    return indicator.rsi()
 
 
 def _event_return_summary(values: List[float]) -> Dict[str, Any]:
@@ -147,6 +141,18 @@ def _event_return_summary(values: List[float]) -> Dict[str, Any]:
         "min_return_pct": float(arr.min()),
         "max_return_pct": float(arr.max()),
     }
+
+
+def _parse_params_json(params_json: Optional[str]) -> Dict[str, Any]:
+    if not params_json:
+        return {}
+    try:
+        parsed = json.loads(params_json)
+    except Exception as exc:
+        raise ValueError(f"Invalid params_json: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("params_json must decode to a JSON object")
+    return parsed
 
 
 def build_technical_tools(alert_system) -> List[Any]:
@@ -570,11 +576,82 @@ def build_technical_tools(alert_system) -> List[Any]:
             return f"Error analyzing RSI threshold events: {exc}"
 
     @tool
+    def get_indicator_value(
+        symbol: str,
+        indicator: str,
+        timeframe: str = "1D",
+        lookback_days: int = 365,
+        params_json: Optional[str] = None,
+    ) -> str:
+        """
+        Get the latest value for a supported `ta` indicator.
+
+        Examples:
+        - indicator='rsi', params_json='{\"window\": 14}'
+        - indicator='adx'
+        - indicator='bollinger_width'
+        - indicator='mfi'
+        """
+        try:
+            sym, df, error = _prepare_bars(alert_system, symbol, lookback_days, timeframe)
+            if error or df is None:
+                return _json_dump({"symbol": sym, "error": error or "no_data"})
+            params = _parse_params_json(params_json)
+            payload = tech.calculate_indicator_snapshot(df, indicator, **params)
+            payload.update(
+                {
+                    "symbol": sym,
+                    "timeframe": timeframe,
+                    "lookback_days": int(lookback_days),
+                    "params": params,
+                    "supported_examples": [
+                        "rsi",
+                        "stoch_k",
+                        "stoch_d",
+                        "williams_r",
+                        "roc",
+                        "tsi",
+                        "ultimate_oscillator",
+                        "macd",
+                        "macd_signal",
+                        "macd_diff",
+                        "sma",
+                        "ema",
+                        "atr",
+                        "adx",
+                        "adx_pos",
+                        "adx_neg",
+                        "cci",
+                        "aroon_up",
+                        "aroon_down",
+                        "bollinger_upper",
+                        "bollinger_lower",
+                        "bollinger_mid",
+                        "bollinger_width",
+                        "bollinger_percent",
+                        "donchian_upper",
+                        "donchian_lower",
+                        "donchian_mid",
+                        "keltner_upper",
+                        "keltner_lower",
+                        "keltner_mid",
+                        "obv",
+                        "cmf",
+                        "mfi",
+                    ],
+                }
+            )
+            return _json_dump(payload)
+        except Exception as exc:
+            logger.exception("get_indicator_value failed")
+            return f"Error getting indicator value: {exc}"
+
+    @tool
     def create_percent_drop_alert(
         symbol: str,
         percent: float,
         chat_id: Optional[int] = None,
-        cooldown_seconds: int = 300,
+        cooldown_seconds: int = 3600,
     ) -> str:
         """
         Create a percent-drop alert rule (percent points, e.g. 2.0 means 2%).
@@ -602,7 +679,7 @@ def build_technical_tools(alert_system) -> List[Any]:
         symbol: str,
         percent: float,
         chat_id: Optional[int] = None,
-        cooldown_seconds: int = 300,
+        cooldown_seconds: int = 3600,
     ) -> str:
         """
         Create a percent-rise alert rule (percent points, e.g. 2.0 means 2%).
@@ -630,7 +707,7 @@ def build_technical_tools(alert_system) -> List[Any]:
         symbol: str,
         target_price: float,
         chat_id: Optional[int] = None,
-        cooldown_seconds: int = 300,
+        cooldown_seconds: int = 3600,
     ) -> str:
         """
         Create a target-price alert rule.
@@ -684,6 +761,7 @@ def build_technical_tools(alert_system) -> List[Any]:
 
     return [
         get_technical_snapshot,
+        get_indicator_value,
         count_price_touches,
         analyze_price_level_reactions,
         count_large_moves,
@@ -713,6 +791,7 @@ def create_technical_agent(alert_system) -> Optional[Agent]:
         "Your role DOES include technical recommendations, but NOT absolute financial advice.",
         "Do not simply say 'buy/sell'. Instead, provide a conditional, evidence-based technical recommendation.",
         "For RSI, MACD, Bollinger, price touches, historical drops, or bounces, ALWAYS use tools and never invent values.",
+        "If the user asks for a specific indicator not covered by the standard snapshot, use get_indicator_value with the closest supported `ta` indicator.",
         "If the question is open-ended (e.g., 'what do you see', 'is there a bounce', 'how does it look technically'), use get_technical_snapshot first.",
         "If the user asks how many times price touched a level, use count_price_touches.",
         "If the user asks whether a level acted as support/resistance, bounce, or breakdown, use analyze_price_level_reactions.",
@@ -724,10 +803,13 @@ def create_technical_agent(alert_system) -> Optional[Agent]:
         "When discussing support/resistance, describe historical evidence (touches, bounces, breakdowns) and limitations.",
         "If signals are mixed or evidence quality is low, recommend waiting for confirmation and say exactly what confirmation is missing.",
         "Your response must ALWAYS include these plain-text sections: Diagnosis, Technical Recommendation, Evidence For, Evidence Against, Key Levels, Confidence, Limitations.",
-        "When the user asks about setting alerts, mentions alerts, or your recommendation includes key levels/thresholds, also include: Suggested Alerts, Next Step.",
-        "In Suggested Alerts, provide 1-2 concrete options in this exact format:",
-        "Option 1: alert <SYMBOL> when it drops <X>%\nOption 2: alert <SYMBOL> when it reaches <PRICE>.",
-        "In Next Step, ask one short question so the user can respond quickly (e.g., 'Reply 1, 2, or give a custom level').",
+        "When the user asks about setting alerts, mentions alerts, or your recommendation includes key levels/thresholds, you MUST always include: Suggested Alerts, Next Step.",
+        "In Suggested Alerts, provide numbered options in this exact format: Option 1: ... Option 2: ... and continue with as many options as are useful.",
+        "Use as many numbered options as needed, but keep them concise and practical.",
+        "Include at least one executable alert option when recommending alerts.",
+        "Include one numbered option for 'more context' or 'custom level/timeframe/condition' whenever clarification would be useful.",
+        "In Next Step, tell the user to reply with only the option number so the thread stays on track.",
+        "Do not ask for free-form confirmation like 'Would you like me to create it?'. Use the numbered options flow instead.",
         "If the user confirms an alert, create it using tools in this same agent (do not delegate).",
         "For alert creation/list/removal, always use tools and never fabricate rule IDs or prices.",
         "In 'Technical Recommendation', use actions such as: wait, observe, wait for confirmed breakout, wait for retest, avoid chasing price, consider an alert; avoid giving final trade orders.",

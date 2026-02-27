@@ -192,7 +192,7 @@ def build_alert_tools(alert_system) -> List[Any]:
         if chat_id is not None and rule.get("chat_id") is None:
             rule["chat_id"] = int(chat_id)
         if rule.get("cooldown_seconds") is None:
-            rule["cooldown_seconds"] = 300
+            rule["cooldown_seconds"] = 3600
         return rule
 
     @tool
@@ -220,7 +220,7 @@ def build_alert_tools(alert_system) -> List[Any]:
             if chat_id is not None:
                 rule["chat_id"] = int(chat_id)
             if rule.get("cooldown_seconds") is None:
-                rule["cooldown_seconds"] = 300
+                rule["cooldown_seconds"] = 3600
             current = alert_system.data_service.get_latest_price(symbol)
             if current is not None:
                 rule["reference_price"] = float(current)
@@ -245,7 +245,7 @@ def build_alert_tools(alert_system) -> List[Any]:
             if chat_id is not None:
                 rule["chat_id"] = int(chat_id)
             if rule.get("cooldown_seconds") is None:
-                rule["cooldown_seconds"] = 300
+                rule["cooldown_seconds"] = 3600
             current = alert_system.data_service.get_latest_price(symbol)
             if current is not None:
                 rule["reference_price"] = float(current)
@@ -270,7 +270,7 @@ def build_alert_tools(alert_system) -> List[Any]:
             if chat_id is not None:
                 rule["chat_id"] = int(chat_id)
             if rule.get("cooldown_seconds") is None:
-                rule["cooldown_seconds"] = 300
+                rule["cooldown_seconds"] = 3600
             saved = alert_system.add_rule(rule)
             return _json_dump(saved)
         except Exception as e:
@@ -297,7 +297,7 @@ def build_alert_tools(alert_system) -> List[Any]:
             if chat_id is not None:
                 rule["chat_id"] = int(chat_id)
             if rule.get("cooldown_seconds") is None:
-                rule["cooldown_seconds"] = 300
+                rule["cooldown_seconds"] = 3600
             saved = alert_system.add_rule(rule)
             return _json_dump(saved)
         except Exception as e:
@@ -324,7 +324,7 @@ def build_alert_tools(alert_system) -> List[Any]:
             if chat_id is not None:
                 rule["chat_id"] = int(chat_id)
             if rule.get("cooldown_seconds") is None:
-                rule["cooldown_seconds"] = 300
+                rule["cooldown_seconds"] = 3600
             saved = alert_system.add_rule(rule)
             return _json_dump(saved)
         except Exception as e:

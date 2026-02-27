@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lumiq.platform.db.core import DatabaseManager, sa, watchlist_state
+from lumiq.platform.db.core import DatabaseManager, sa, watchlist_groups
 from lumiq.platform.db.repositories import DbWatchlistRepository
 
 
-def test_watchlist_repo_persists_single_json_state(tmp_path: Path):
+def test_watchlist_repo_persists_watchlist_groups_rows(tmp_path: Path):
     db_path = tmp_path / "watchlist.db"
     manager = DatabaseManager(db_url=f"sqlite+pysqlite:///{db_path}", auto_create=True, echo=False)
     repo = DbWatchlistRepository(manager)
@@ -33,7 +33,8 @@ def test_watchlist_repo_persists_single_json_state(tmp_path: Path):
     assert "faang" not in cfg3["groups"]
 
     with manager.connect() as conn:
-        payload = conn.execute(sa.select(watchlist_state.c.payload).where(watchlist_state.c.id == 1)).scalar_one_or_none()
-    assert isinstance(payload, dict)
-    assert "groups" in payload and "favorites" in payload and "benchmarks" in payload
-
+        rows = conn.execute(sa.select(watchlist_groups).order_by(watchlist_groups.c.name.asc())).mappings().all()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "favorites"
+    assert rows[0]["kind"] == "favorites"
+    assert rows[0]["tickers"] == ["META"]

@@ -32,19 +32,45 @@ def _t(*args, **kwargs):
 
 
 if SQLALCHEMY_AVAILABLE:
-    watchlist_state = _t(
-        "watchlist_state",
+    watchlist_groups = _t(
+        "watchlist_groups",
         metadata,
-        Column("id", Integer, primary_key=True, server_default=sa.text("1")),
-        Column("payload", JSON, nullable=False, server_default=sa.text("'{}'")),
+        Column("id", String(64), primary_key=True),
+        Column("chat_id", sa.BigInteger, nullable=True, index=True),
+        Column("user_id", sa.BigInteger, nullable=True, index=True),
+        Column("name", String(128), nullable=False),
+        Column("kind", String(32), nullable=False, server_default=sa.text("'custom'"), index=True),
+        Column("tickers", JSON, nullable=False, server_default=sa.text("'[]'")),
+        Column("benchmarks", JSON, nullable=False, server_default=sa.text("'{}'")),
+        Column("meta", JSON, nullable=False, server_default=sa.text("'{}'")),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+        sa.UniqueConstraint("chat_id", "user_id", "name", name="uq_watchlist_groups_owner_name"),
     )
 
-    alerts_state = _t(
-        "alerts_state",
+    # Legacy singleton JSON store removed. Keep the symbol for import compatibility.
+    watchlist_state = None
+
+    # Legacy singleton JSON store removed. Keep the symbol for import compatibility.
+    alerts_state = None
+
+    alerts = _t(
+        "alerts",
         metadata,
-        Column("id", Integer, primary_key=True, server_default=sa.text("1")),
-        Column("payload", JSON, nullable=False, server_default=sa.text("'{}'")),
+        Column("id", String(36), primary_key=True),
+        Column("chat_id", sa.BigInteger, nullable=True, index=True),
+        Column("user_id", sa.BigInteger, nullable=True, index=True),
+        Column("symbol", String(64), nullable=False, index=True),
+        Column("rule_type", String(64), nullable=False, index=True),
+        Column("active", Boolean, nullable=False, server_default=sa.text("true"), index=True),
+        Column("cooldown_seconds", Integer, nullable=False, server_default=sa.text("3600")),
+        Column("threshold_pct", Numeric(18, 8), nullable=True),
+        Column("target_price", Numeric(18, 8), nullable=True),
+        Column("reference_price", Numeric(18, 8), nullable=True),
+        Column("last_triggered_price", Numeric(18, 8), nullable=True),
+        Column("last_triggered_at", DateTime(timezone=True), nullable=True, index=True),
+        Column("params", JSON, nullable=False, server_default=sa.text("'{}'")),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
         Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
 
@@ -243,7 +269,8 @@ if SQLALCHEMY_AVAILABLE:
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     )
 else:  # pragma: no cover
-    watchlist_state = alerts_state = None
+    watchlist_groups = None
+    watchlist_state = alerts_state = alerts = None
     agent_messages = tasks = task_runs = artifacts = reports = observations = None
     memory_semantic = memory_episodic = memory_procedural = None
     chat_sessions = chat_turns = None

@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from lumiq.platform.db.core import DatabaseManager, alerts_state, sa
+from lumiq.platform.db.core import DatabaseManager, alerts, sa
 from lumiq.platform.db.repositories import DbAlertRulesStoreAdapter
 from lumiq.platform.alerts.alert_system import AlertSystem
 
@@ -19,39 +19,29 @@ def test_alert_rules_db_adapter_roundtrip_sqlite(tmp_path: Path):
     manager = DatabaseManager(db_url=f"sqlite+pysqlite:///{db_path}", auto_create=True, echo=False)
     store = DbAlertRulesStoreAdapter(manager)
 
-    payload = {
-        "schema_version": 1,
-        "updated_at": "2026-02-27T00:00:00Z",
-        "rules": [
-            {
-                "id": "r1",
-                "chat_id": 123,
-                "symbol": "ETH/USD",
-                "type": "percent_drop",
-                "threshold": 0.03,
-                "active": True,
-            }
-        ],
-    }
-    store.write(payload)
+    store.add_rule(
+        {
+            "id": "r1",
+            "chat_id": 123,
+            "symbol": "ETH/USD",
+            "type": "percent_drop",
+            "threshold": 0.03,
+            "active": True,
+        }
+    )
     loaded = store.read()
 
-    assert loaded["schema_version"] == 1
+    assert loaded["schema_version"] == 2
     assert len(loaded["rules"]) == 1
     assert loaded["rules"][0]["symbol"] == "ETH/USD"
 
-    store.log_event(alert_id="r1", symbol="ETH/USD", event_type="triggered", payload={"price": 3100})
-    loaded_after_event = store.read()
-    assert "events" in loaded_after_event
-    assert len(loaded_after_event["events"]) == 1
-    assert loaded_after_event["events"][0]["event_type"] == "triggered"
-
     with manager.connect() as conn:
-        row = conn.execute(sa.select(alerts_state).where(alerts_state.c.id == 1)).mappings().first()
+        row = conn.execute(sa.select(alerts).where(alerts.c.id == "r1")).mappings().first()
     assert row is not None
+    assert row["rule_type"] == "percent_drop"
 
 
-def test_alert_system_persists_rules_in_single_json_table(tmp_path: Path):
+def test_alert_system_persists_rules_in_relational_table(tmp_path: Path):
     db_path = tmp_path / "alerts_system.db"
     manager = DatabaseManager(db_url=f"sqlite+pysqlite:///{db_path}", auto_create=True, echo=False)
     alerts_store = DbAlertRulesStoreAdapter(manager)
@@ -88,6 +78,7 @@ def test_alert_system_persists_rules_in_single_json_table(tmp_path: Path):
     )
     assert created["symbol"] == "ETH/USD"
     assert created["type"] == "percent_drop"
+    assert int(created["cooldown_seconds"]) == 3600
 
     rules = system.list_rules()
     assert len(rules) == 1
@@ -98,6 +89,5 @@ def test_alert_system_persists_rules_in_single_json_table(tmp_path: Path):
     assert system.list_rules() == []
 
     with manager.connect() as conn:
-        row = conn.execute(sa.select(alerts_state.c.payload).where(alerts_state.c.id == 1)).scalar_one_or_none()
-    assert isinstance(row, dict)
-    assert row.get("rules") == []
+        count = conn.execute(sa.select(sa.func.count()).select_from(alerts)).scalar_one()
+    assert int(count) == 0

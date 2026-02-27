@@ -317,12 +317,12 @@ class AlertSystem:
 
     # ===== Alert Rules Persistence =====
     def list_rules(self) -> List[Dict[str, Any]]:
+        if hasattr(self._alerts_store, "list_rules"):
+            return list(self._alerts_store.list_rules())
         data = self._alerts_store.read()
         return list(data.get("rules", []))
 
     def add_rule(self, rule: Dict[str, Any]) -> Dict[str, Any]:
-        data = self._alerts_store.read()
-        rules = data.get("rules", [])
         if not rule.get("id"):
             rule["id"] = str(uuid.uuid4())
         if rule.get("chat_id") is None and self._active_chat_id is not None:
@@ -332,18 +332,18 @@ class AlertSystem:
             if fallback is not None:
                 rule["chat_id"] = int(fallback)
         if rule.get("cooldown_seconds") is None:
-            rule["cooldown_seconds"] = 300
+            rule["cooldown_seconds"] = 3600
         if rule.get("last_triggered_at") is None:
             rule["last_triggered_at"] = None
-        rules.append(rule)
-        data["rules"] = rules
-        data["updated_at"] = datetime.now().isoformat()
-        self._alerts_store.write(data)
-        if hasattr(self._alerts_store, "log_event"):
-            try:
-                self._alerts_store.log_event(rule.get("id"), rule.get("symbol"), "created", payload=rule)
-            except Exception:
-                logger.exception("Failed to log alert created event")
+        if hasattr(self._alerts_store, "add_rule"):
+            rule = self._alerts_store.add_rule(rule)
+        else:
+            data = self._alerts_store.read()
+            rules = data.get("rules", [])
+            rules.append(rule)
+            data["rules"] = rules
+            data["updated_at"] = datetime.now().isoformat()
+            self._alerts_store.write(data)
         if self._stream_manager is not None:
             try:
                 self._stream_manager.refresh_subscriptions()
@@ -352,6 +352,15 @@ class AlertSystem:
         return rule
 
     def update_rule(self, rule_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if hasattr(self._alerts_store, "update_rule"):
+            result = self._alerts_store.update_rule(rule_id, updates)
+            if result is not None and self._stream_manager is not None:
+                try:
+                    self._stream_manager.refresh_subscriptions()
+                except Exception as e:
+                    logger.error("Failed to refresh stream subscriptions: %s", e)
+            return result
+
         data = self._alerts_store.read()
         rules = data.get("rules", [])
         for r in rules:
@@ -359,11 +368,6 @@ class AlertSystem:
                 r.update(updates)
                 data["updated_at"] = datetime.now().isoformat()
                 self._alerts_store.write(data)
-                if hasattr(self._alerts_store, "log_event"):
-                    try:
-                        self._alerts_store.log_event(rule_id, r.get("symbol"), "updated", payload=updates)
-                    except Exception:
-                        logger.exception("Failed to log alert updated event")
                 if self._stream_manager is not None:
                     try:
                         self._stream_manager.refresh_subscriptions()
@@ -373,6 +377,15 @@ class AlertSystem:
         return None
 
     def remove_rule(self, rule_id: str) -> bool:
+        if hasattr(self._alerts_store, "remove_rule"):
+            removed = bool(self._alerts_store.remove_rule(rule_id))
+            if removed and self._stream_manager is not None:
+                try:
+                    self._stream_manager.refresh_subscriptions()
+                except Exception as e:
+                    logger.error("Failed to refresh stream subscriptions: %s", e)
+            return removed
+
         data = self._alerts_store.read()
         rules = data.get("rules", [])
         new_rules = [r for r in rules if r.get("id") != rule_id]
@@ -381,11 +394,6 @@ class AlertSystem:
         data["rules"] = new_rules
         data["updated_at"] = datetime.now().isoformat()
         self._alerts_store.write(data)
-        if hasattr(self._alerts_store, "log_event"):
-            try:
-                self._alerts_store.log_event(rule_id, None if not new_rules else next((x.get("symbol") for x in rules if x.get("id")==rule_id), None), "removed", payload={"rule_id": rule_id})
-            except Exception:
-                logger.exception("Failed to log alert removed event")
         if self._stream_manager is not None:
             try:
                 self._stream_manager.refresh_subscriptions()
