@@ -10,7 +10,7 @@ from .core import (
     SQLALCHEMY_AVAILABLE,
     DatabaseManager,
     sa,
-    watchlist_state,
+    watchlist_groups,
     alerts,
     agent_messages,
     tasks,
@@ -55,122 +55,264 @@ class DbWatchlistRepository:
     def __init__(self, db: DatabaseManager):
         self.db = db
 
-    def _default_payload(self) -> Dict[str, Any]:
+    def _default_benchmarks(self) -> Dict[str, Any]:
+        return {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]}
+
+    def _normalize_group_name(self, value: Any) -> str:
+        return str(value or "").strip().lower()
+
+    def _normalize_symbol(self, value: Any) -> str:
+        sym = str(value or "").strip().upper()
+        if not sym:
+            return ""
+        if "/" in sym:
+            return sym.replace("-", "/")
+        if "-" in sym and len(sym) <= 12:
+            return sym.replace("-", "/")
+        return sym
+
+    def _normalize_tickers(self, tickers: Iterable[Any]) -> List[str]:
+        seen: set[str] = set()
+        out: List[str] = []
+        for item in tickers or []:
+            sym = self._normalize_symbol(item)
+            if sym and sym not in seen:
+                seen.add(sym)
+                out.append(sym)
+        return out
+
+    def _safe_json_list(self, value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if value in (None, ""):
+            return []
+        try:
+            if isinstance(value, str):
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+        return []
+
+    def _read_groups(self) -> List[Dict[str, Any]]:
+        with self.db.connect() as conn:
+            rows = conn.execute(sa.select(watchlist_groups).order_by(watchlist_groups.c.created_at.asc())).mappings().all()
+        return [dict(row) for row in rows]
+
+    def _find_existing_group_id(
+        self,
+        conn,
+        *,
+        name: str,
+        chat_id: Optional[int] = None,
+        user_id: Optional[int] = None,
+    ) -> Optional[str]:
+        stmt = sa.select(watchlist_groups.c.id).where(watchlist_groups.c.name == self._normalize_group_name(name))
+        if chat_id is None:
+            stmt = stmt.where(watchlist_groups.c.chat_id.is_(None))
+        else:
+            stmt = stmt.where(watchlist_groups.c.chat_id == int(chat_id))
+        if user_id is None:
+            stmt = stmt.where(watchlist_groups.c.user_id.is_(None))
+        else:
+            stmt = stmt.where(watchlist_groups.c.user_id == int(user_id))
+        return conn.execute(stmt).scalar_one_or_none()
+
+    def _upsert_group_row(
+        self,
+        *,
+        name: str,
+        tickers: Iterable[Any],
+        kind: str = "custom",
+        benchmarks: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        normalized_name = self._normalize_group_name(name)
+        if not normalized_name:
+            raise ValueError("group name is required")
+        normalized_tickers = self._normalize_tickers(tickers)
+        persisted_id: Optional[str] = None
+        with self.db.begin() as conn:
+            exists = self._find_existing_group_id(conn, name=normalized_name)
+            values = {
+                "name": normalized_name,
+                "kind": str(kind or "custom").strip().lower(),
+                "tickers": normalized_tickers,
+                "benchmarks": benchmarks if isinstance(benchmarks, dict) else {},
+                "meta": meta if isinstance(meta, dict) else {},
+                "updated_at": sa.func.now(),
+            }
+            if exists is None:
+                persisted_id = _uuid()
+                conn.execute(
+                    sa.insert(watchlist_groups).values(
+                        id=persisted_id,
+                        created_at=sa.func.now(),
+                        **values,
+                    )
+                )
+            else:
+                persisted_id = str(exists)
+                conn.execute(
+                    sa.update(watchlist_groups)
+                    .where(watchlist_groups.c.id == exists)
+                    .values(**values)
+                )
         return {
-            "groups": {},
-            "favorites": [],
-            "benchmarks": {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]},
-            "updated_at": _now_iso(),
-            "schema_version": 1,
+            "id": persisted_id or "",
+            "name": normalized_name,
+            "kind": str(kind or "custom").strip().lower(),
+            "tickers": normalized_tickers,
+            "benchmarks": benchmarks if isinstance(benchmarks, dict) else {},
+            "meta": meta if isinstance(meta, dict) else {},
         }
 
-    def _read_payload(self) -> Dict[str, Any]:
-        with self.db.connect() as conn:
-            row = conn.execute(sa.select(watchlist_state.c.payload).where(watchlist_state.c.id == 1)).scalar_one_or_none()
-        payload = _safe_json(row)
-        if not payload:
-            payload = self._default_payload()
-        payload.setdefault("groups", {})
-        payload.setdefault("favorites", [])
-        payload.setdefault("benchmarks", {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]})
-        payload.setdefault("schema_version", 1)
-        return payload
-
-    def _write_payload(self, payload: Dict[str, Any]) -> None:
-        to_save = dict(payload or {})
-        to_save["updated_at"] = _now_iso()
-        to_save.setdefault("schema_version", 1)
-        with self.db.begin() as conn:
-            exists = conn.execute(sa.select(watchlist_state.c.id).where(watchlist_state.c.id == 1)).scalar_one_or_none()
-            if exists is None:
-                conn.execute(sa.insert(watchlist_state).values(id=1, payload=to_save, updated_at=sa.func.now()))
-            else:
-                conn.execute(
-                    sa.update(watchlist_state)
-                    .where(watchlist_state.c.id == 1)
-                    .values(payload=to_save, updated_at=sa.func.now())
-                )
-
     def load_config_dict(self) -> Dict[str, Any]:
-        payload = self._read_payload()
+        rows = self._read_groups()
+        groups: Dict[str, List[str]] = {}
+        favorites: List[str] = []
+        benchmarks = self._default_benchmarks()
+        for row in rows:
+            name = self._normalize_group_name(row.get("name"))
+            tickers = self._normalize_tickers(self._safe_json_list(row.get("tickers")))
+            kind = str(row.get("kind") or "custom").strip().lower()
+            if not name:
+                continue
+            if name == "favorites" or kind == "favorites":
+                favorites = tickers
+                row_bench = _safe_json(row.get("benchmarks"))
+                if row_bench:
+                    benchmarks = row_bench
+                continue
+            groups[name] = tickers
         return {
-            "groups": payload.get("groups") or {},
-            "favorites": payload.get("favorites") or [],
-            "benchmarks": payload.get("benchmarks") or {"stocks": ["SPY", "QQQ"], "crypto": ["BTC/USD", "ETH/USD"]},
+            "groups": groups,
+            "favorites": favorites,
+            "benchmarks": benchmarks,
         }
 
     def save_config_dict(self, payload: Dict[str, Any]) -> None:
-        base = self._read_payload()
-        base["groups"] = payload.get("groups") or {}
-        base["favorites"] = payload.get("favorites") or []
-        base["benchmarks"] = payload.get("benchmarks") or {}
-        self._write_payload(base)
+        groups = dict((payload or {}).get("groups") or {})
+        favorites = self._normalize_tickers((payload or {}).get("favorites") or [])
+        benchmarks = _safe_json((payload or {}).get("benchmarks")) or self._default_benchmarks()
+        desired_names = {self._normalize_group_name(name) for name in groups.keys()}
+        if favorites:
+            desired_names.add("favorites")
+        with self.db.begin() as conn:
+            existing = conn.execute(sa.select(watchlist_groups.c.id, watchlist_groups.c.name)).mappings().all()
+            for row in existing:
+                row_name = self._normalize_group_name(row.get("name"))
+                if row_name not in desired_names:
+                    conn.execute(sa.delete(watchlist_groups).where(watchlist_groups.c.id == row["id"]))
+            for name, tickers in groups.items():
+                normalized_name = self._normalize_group_name(name)
+                if not normalized_name:
+                    continue
+                values = {
+                    "name": normalized_name,
+                    "kind": "custom",
+                    "tickers": self._normalize_tickers(tickers or []),
+                    "benchmarks": {},
+                    "meta": {},
+                    "updated_at": sa.func.now(),
+                }
+                exists = self._find_existing_group_id(conn, name=normalized_name)
+                if exists is None:
+                    conn.execute(sa.insert(watchlist_groups).values(id=_uuid(), created_at=sa.func.now(), **values))
+                else:
+                    conn.execute(sa.update(watchlist_groups).where(watchlist_groups.c.id == exists).values(**values))
+            if favorites:
+                values = {
+                    "name": "favorites",
+                    "kind": "favorites",
+                    "tickers": favorites,
+                    "benchmarks": benchmarks,
+                    "meta": {},
+                    "updated_at": sa.func.now(),
+                }
+                exists = self._find_existing_group_id(conn, name="favorites")
+                if exists is None:
+                    conn.execute(sa.insert(watchlist_groups).values(id=_uuid(), created_at=sa.func.now(), **values))
+                else:
+                    conn.execute(sa.update(watchlist_groups).where(watchlist_groups.c.id == exists).values(**values))
 
     def upsert_ticker(self, ticker: str, groups: Iterable[str], favorite: bool = False) -> Dict[str, Any]:
-        payload = self._read_payload()
-        all_groups: Dict[str, List[str]] = payload.get("groups") or {}
-        favorites: List[str] = list(payload.get("favorites") or [])
+        sym = self._normalize_symbol(ticker)
+        if not sym:
+            raise ValueError("ticker is required")
+        cfg = self.load_config_dict()
+        all_groups: Dict[str, List[str]] = dict(cfg.get("groups") or {})
+        favorites: List[str] = list(cfg.get("favorites") or [])
+        benchmarks = _safe_json(cfg.get("benchmarks")) or self._default_benchmarks()
         assigned: List[str] = []
         for g in groups:
-            gname = str(g).strip().lower()
+            gname = self._normalize_group_name(g)
             if not gname:
                 continue
             bucket = list(all_groups.get(gname) or [])
-            if ticker not in bucket:
-                bucket.append(ticker)
+            if sym not in bucket:
+                bucket.append(sym)
             all_groups[gname] = bucket
             assigned.append(gname)
-        if favorite and ticker not in favorites:
-            favorites.append(ticker)
-        if "favorites" in assigned and ticker not in favorites:
-            favorites.append(ticker)
-        payload["groups"] = all_groups
-        payload["favorites"] = favorites
-        self._write_payload(payload)
-        return {"ticker": ticker, "groups": assigned, "favorite": favorite or ("favorites" in assigned)}
+        if favorite and sym not in favorites:
+            favorites.append(sym)
+        if "favorites" in assigned and sym not in favorites:
+            favorites.append(sym)
+        self.save_config_dict({"groups": all_groups, "favorites": favorites, "benchmarks": benchmarks})
+        return {"ticker": sym, "groups": assigned, "favorite": favorite or ("favorites" in assigned)}
 
     def remove_group(self, group_name: str) -> Dict[str, Any]:
-        gname = str(group_name).strip().lower()
-        payload = self._read_payload()
-        groups = payload.get("groups") or {}
-        existed = gname in groups
-        removed = list(groups.pop(gname, [])) if existed else []
-        payload["groups"] = groups
-        self._write_payload(payload)
+        gname = self._normalize_group_name(group_name)
+        if not gname:
+            return {"group": gname, "removed_group": False, "tickers_removed_count": 0}
+        cfg = self.load_config_dict()
+        groups = dict(cfg.get("groups") or {})
+        favorites = list(cfg.get("favorites") or [])
+        benchmarks = _safe_json(cfg.get("benchmarks")) or self._default_benchmarks()
+        existed = False
+        removed: List[str] = []
+        if gname == "favorites":
+            existed = bool(favorites)
+            removed = list(favorites)
+            favorites = []
+        elif gname in groups:
+            existed = True
+            removed = list(groups.pop(gname, []))
+        self.save_config_dict({"groups": groups, "favorites": favorites, "benchmarks": benchmarks})
         removed_count = len(removed)
         return {"group": gname, "removed_group": existed, "tickers_removed_count": removed_count}
 
     def remove_ticker(self, ticker: str, group_name: Optional[str] = None, from_favorites: bool = False) -> Dict[str, Any]:
-        payload = self._read_payload()
-        groups = payload.get("groups") or {}
-        favorites = list(payload.get("favorites") or [])
+        sym = self._normalize_symbol(ticker)
+        cfg = self.load_config_dict()
+        groups = dict(cfg.get("groups") or {})
+        favorites = list(cfg.get("favorites") or [])
+        benchmarks = _safe_json(cfg.get("benchmarks")) or self._default_benchmarks()
         removed_groups: List[str] = []
         removed_fav = False
         if group_name:
-            gname = str(group_name).strip().lower()
+            gname = self._normalize_group_name(group_name)
             current = list(groups.get(gname) or [])
-            if ticker in current:
-                groups[gname] = [t for t in current if t != ticker]
+            if sym in current:
+                groups[gname] = [t for t in current if t != sym]
                 if not groups[gname]:
                     groups.pop(gname, None)
                 removed_groups.append(gname)
         else:
             for gname, current in list(groups.items()):
-                if ticker in current:
-                    groups[gname] = [t for t in current if t != ticker]
+                if sym in current:
+                    groups[gname] = [t for t in current if t != sym]
                     if not groups[gname]:
                         groups.pop(gname, None)
                     removed_groups.append(gname)
 
         if from_favorites or (group_name and str(group_name).strip().lower() == "favorites"):
-            if ticker in favorites:
-                favorites = [t for t in favorites if t != ticker]
+            if sym in favorites:
+                favorites = [t for t in favorites if t != sym]
                 removed_fav = True
 
-        payload["groups"] = groups
-        payload["favorites"] = favorites
-        self._write_payload(payload)
-        return {"ticker": ticker, "removed_from_groups": sorted(set(removed_groups)), "removed_from_favorites": removed_fav}
+        self.save_config_dict({"groups": groups, "favorites": favorites, "benchmarks": benchmarks})
+        return {"ticker": sym, "removed_from_groups": sorted(set(removed_groups)), "removed_from_favorites": removed_fav}
 
 
 def _to_optional_float(value: Any) -> Optional[float]:
