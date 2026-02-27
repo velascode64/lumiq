@@ -13,3 +13,5 @@ schedule
 pytest
 fastapi
 uvicorn[standard]
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1

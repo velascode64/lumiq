@@ -314,10 +314,12 @@ class WatchlistNewsScheduler:
         send_callback: Callable[[int, str], None],
         chat_ids: Optional[Sequence[int]] = None,
         analyze_callback: Optional[Callable[[Optional[str]], str]] = None,
+        persist_callback: Optional[Callable[..., None]] = None,
     ):
         self.service = service
         self.send_callback = send_callback
         self.analyze_callback = analyze_callback
+        self.persist_callback = persist_callback
         self.chat_ids: List[int] = [int(c) for c in (chat_ids or _parse_chat_ids_from_env())]
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -371,6 +373,11 @@ class WatchlistNewsScheduler:
             else:
                 text = self.service.generate_preopen_digest_text(group_name=group_name)
             final = (f"[{source}] " if source else "") + text
+            if self.persist_callback is not None:
+                try:
+                    self.persist_callback(text=final, source=source, group_name=group_name, chat_id=chat_id)
+                except Exception as exc:
+                    logger.exception("Failed to persist news digest: %s", exc)
             target_ids = [int(chat_id)] if chat_id is not None else list(self.chat_ids)
             for cid in target_ids:
                 self.send_callback(cid, final)

@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -568,12 +569,130 @@ def build_technical_tools(alert_system) -> List[Any]:
             logger.exception("analyze_rsi_threshold_events failed")
             return f"Error analyzing RSI threshold events: {exc}"
 
+    @tool
+    def create_percent_drop_alert(
+        symbol: str,
+        percent: float,
+        chat_id: Optional[int] = None,
+        cooldown_seconds: int = 300,
+    ) -> str:
+        """
+        Create a percent-drop alert rule (percent points, e.g. 2.0 means 2%).
+        """
+        try:
+            rule: Dict[str, Any] = {
+                "id": str(uuid.uuid4()),
+                "symbol": _normalize_symbol(symbol),
+                "type": "percent_drop",
+                "threshold": abs(float(percent)),
+                "active": True,
+                "cooldown_seconds": max(0, int(cooldown_seconds)),
+                "last_triggered_at": None,
+            }
+            if chat_id is not None:
+                rule["chat_id"] = int(chat_id)
+            created = alert_system.add_rule(rule)
+            return _json_dump(created)
+        except Exception as exc:
+            logger.exception("create_percent_drop_alert failed")
+            return f"Error creating percent drop alert: {exc}"
+
+    @tool
+    def create_percent_rise_alert(
+        symbol: str,
+        percent: float,
+        chat_id: Optional[int] = None,
+        cooldown_seconds: int = 300,
+    ) -> str:
+        """
+        Create a percent-rise alert rule (percent points, e.g. 2.0 means 2%).
+        """
+        try:
+            rule: Dict[str, Any] = {
+                "id": str(uuid.uuid4()),
+                "symbol": _normalize_symbol(symbol),
+                "type": "percent_rise",
+                "threshold": abs(float(percent)),
+                "active": True,
+                "cooldown_seconds": max(0, int(cooldown_seconds)),
+                "last_triggered_at": None,
+            }
+            if chat_id is not None:
+                rule["chat_id"] = int(chat_id)
+            created = alert_system.add_rule(rule)
+            return _json_dump(created)
+        except Exception as exc:
+            logger.exception("create_percent_rise_alert failed")
+            return f"Error creating percent rise alert: {exc}"
+
+    @tool
+    def create_target_price_alert(
+        symbol: str,
+        target_price: float,
+        chat_id: Optional[int] = None,
+        cooldown_seconds: int = 300,
+    ) -> str:
+        """
+        Create a target-price alert rule.
+        """
+        try:
+            rule: Dict[str, Any] = {
+                "id": str(uuid.uuid4()),
+                "symbol": _normalize_symbol(symbol),
+                "type": "target_price",
+                "target": float(target_price),
+                "active": True,
+                "cooldown_seconds": max(0, int(cooldown_seconds)),
+                "last_triggered_at": None,
+            }
+            if chat_id is not None:
+                rule["chat_id"] = int(chat_id)
+            created = alert_system.add_rule(rule)
+            return _json_dump(created)
+        except Exception as exc:
+            logger.exception("create_target_price_alert failed")
+            return f"Error creating target price alert: {exc}"
+
+    @tool
+    def list_alerts(chat_id: Optional[int] = None) -> str:
+        """
+        List active alert rules. Optionally filter by chat_id.
+        """
+        try:
+            rules = alert_system.list_rules()
+            if chat_id is not None:
+                rules = [r for r in rules if int(r.get("chat_id") or 0) == int(chat_id)]
+            return _json_dump({"count": len(rules), "rules": rules})
+        except Exception as exc:
+            logger.exception("list_alerts failed")
+            return f"Error listing alerts: {exc}"
+
+    @tool
+    def remove_alert(rule_id: str) -> str:
+        """
+        Remove an alert rule by id.
+        """
+        try:
+            rid = (rule_id or "").strip()
+            if not rid:
+                return _json_dump({"removed": False, "error": "missing_rule_id"})
+            removed = bool(alert_system.remove_rule(rid))
+            return _json_dump({"removed": removed, "rule_id": rid})
+        except Exception as exc:
+            logger.exception("remove_alert failed")
+            return f"Error removing alert: {exc}"
+
     return [
         get_technical_snapshot,
         count_price_touches,
         analyze_price_level_reactions,
         count_large_moves,
         analyze_rsi_threshold_events,
+        create_percent_drop_alert,
+        create_percent_rise_alert,
+        create_target_price_alert,
+        list_alerts,
+        remove_alert,
     ]
 
 
@@ -605,6 +724,12 @@ def create_technical_agent(alert_system) -> Optional[Agent]:
         "When discussing support/resistance, describe historical evidence (touches, bounces, breakdowns) and limitations.",
         "If signals are mixed or evidence quality is low, recommend waiting for confirmation and say exactly what confirmation is missing.",
         "Your response must ALWAYS include these plain-text sections: Diagnosis, Technical Recommendation, Evidence For, Evidence Against, Key Levels, Confidence, Limitations.",
+        "When the user asks about setting alerts, mentions alerts, or your recommendation includes key levels/thresholds, also include: Suggested Alerts, Next Step.",
+        "In Suggested Alerts, provide 1-2 concrete options in this exact format:",
+        "Option 1: alert <SYMBOL> when it drops <X>%\nOption 2: alert <SYMBOL> when it reaches <PRICE>.",
+        "In Next Step, ask one short question so the user can respond quickly (e.g., 'Reply 1, 2, or give a custom level').",
+        "If the user confirms an alert, create it using tools in this same agent (do not delegate).",
+        "For alert creation/list/removal, always use tools and never fabricate rule IDs or prices.",
         "In 'Technical Recommendation', use actions such as: wait, observe, wait for confirmed breakout, wait for retest, avoid chasing price, consider an alert; avoid giving final trade orders.",
         "In 'Key Levels', include support/resistance if they can be inferred; otherwise state that explicitly.",
         "In 'Confidence', use low/medium/high and explain why in one sentence.",

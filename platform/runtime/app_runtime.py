@@ -24,6 +24,15 @@ try:
     from ..portfolio.review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
     from ..news.news_monitor import WatchlistNewsMonitorService, WatchlistNewsScheduler
     from ...agents.agno.members.news_agent import create_news_agent, run_news_agent_message
+    from ..db import (
+        create_database_manager_from_env,
+        create_agno_postgres_db_from_env,
+        DbWatchlistRepository,
+        DbAlertRulesStoreAdapter,
+        DbCoordinationRepository,
+        DbMemoryRepository,
+        DbChatContextRepository,
+    )
 except ImportError:
     from lumibot.core.orchestration.strategy_orchestrator import StrategyOrchestrator
     from agents.agno.members.trading_agent_compat import create_trading_agent
@@ -34,6 +43,23 @@ except ImportError:
     from platform.portfolio.review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
     from platform.news.news_monitor import WatchlistNewsMonitorService, WatchlistNewsScheduler
     from agents.agno.members.news_agent import create_news_agent, run_news_agent_message
+    try:
+        from platform.db import (
+            create_database_manager_from_env,
+            create_agno_postgres_db_from_env,
+            DbWatchlistRepository,
+            DbAlertRulesStoreAdapter,
+            DbCoordinationRepository,
+            DbMemoryRepository,
+            DbChatContextRepository,
+        )
+    except ImportError:
+        create_database_manager_from_env = None  # type: ignore
+        DbWatchlistRepository = None  # type: ignore
+        DbAlertRulesStoreAdapter = None  # type: ignore
+        DbCoordinationRepository = None  # type: ignore
+        DbMemoryRepository = None  # type: ignore
+        DbChatContextRepository = None  # type: ignore
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +122,13 @@ class CoreRuntime:
 
     def __init__(self, strategies_path: Optional[str] = None):
         broker_config = build_broker_config()
+        self.db = create_database_manager_from_env() if create_database_manager_from_env is not None else None
+        self.agno_team_db = create_agno_postgres_db_from_env() if create_agno_postgres_db_from_env is not None else None
+        self.coordination_repo = DbCoordinationRepository(self.db) if (self.db and DbCoordinationRepository is not None) else None
+        self.memory_repo = DbMemoryRepository(self.db) if (self.db and DbMemoryRepository is not None) else None
+        self.chat_context_repo = DbChatContextRepository(self.db) if (self.db and DbChatContextRepository is not None) else None
+        self.alert_rules_store_adapter = DbAlertRulesStoreAdapter(self.db) if (self.db and DbAlertRulesStoreAdapter is not None) else None
+        watchlist_repo = DbWatchlistRepository(self.db) if (self.db and DbWatchlistRepository is not None) else None
         default_path = Path(__file__).resolve().parents[2] / "lumibot" / "strategies" / "live"
         self.orchestrator = StrategyOrchestrator(
             broker_config=broker_config,
@@ -104,7 +137,7 @@ class CoreRuntime:
         self.alert_system: Optional[AlertSystem] = None
         self.stream_manager: Optional[AlertStreamManager] = None
         self.notifier = TelegramNotifier()
-        self.watchlist_store = WatchlistStore()
+        self.watchlist_store = WatchlistStore(repo=watchlist_repo)
         self.portfolio_review_service: Optional[PortfolioReviewService] = None
         self.portfolio_review_scheduler: Optional[PortfolioReviewScheduler] = None
         self.news_monitor_service: Optional[WatchlistNewsMonitorService] = None
@@ -112,7 +145,9 @@ class CoreRuntime:
         self.news_agent = None
 
         try:
-            self.alert_system = AlertSystem()
+            self.alert_system = AlertSystem(
+                alerts_store_override=self.alert_rules_store_adapter,
+            )
         except Exception as exc:
             logger.warning("AlertSystem disabled: %s", exc)
 
@@ -130,9 +165,26 @@ class CoreRuntime:
                 watchlist_store=self.watchlist_store,
                 data_service=data_service,
             )
+            def _persist_portfolio_report(report_kind: str, text: str, source: str, group_name: Optional[str], chat_id: Optional[int]) -> None:
+                if self.coordination_repo is None:
+                    return
+                scope_type = "group" if group_name else "portfolio"
+                scope_value = group_name
+                title = f"portfolio_{report_kind}"
+                self.coordination_repo.create_report(
+                    report_type=report_kind,
+                    scope_type=scope_type,
+                    scope_value=scope_value,
+                    chat_id=chat_id,
+                    title=title,
+                    summary=text[:8000],
+                    payload={"source": source, "group_name": group_name},
+                    created_by=f"{source or 'scheduler'}:portfolio",
+                )
             self.portfolio_review_scheduler = PortfolioReviewScheduler(
                 review_service=self.portfolio_review_service,
                 send_callback=self.notifier.send,
+                persist_callback=_persist_portfolio_report,
             )
         except Exception as exc:
             logger.warning("PortfolioReview disabled: %s", exc)
@@ -151,16 +203,37 @@ class CoreRuntime:
                     "Formato: Resumen, Alta prioridad, Impacto en posiciones, Impacto en watchlist sin posicion, Ruido, Tickers a revisar primero, Sugerencias."
                 )
                 return run_news_agent_message(self.news_agent, msg, user_id="cron-news", session_id=f"news-preopen-{group_name or 'all'}")
+            def _persist_news_digest(text: str, source: str, group_name: Optional[str], chat_id: Optional[int]) -> None:
+                if self.coordination_repo is None:
+                    return
+                self.coordination_repo.create_report(
+                    report_type="news_preopen",
+                    scope_type="group" if group_name else "watchlist",
+                    scope_value=group_name,
+                    chat_id=chat_id,
+                    title="watchlist_news_digest",
+                    summary=text[:8000],
+                    payload={"source": source, "group_name": group_name},
+                    created_by=f"{source or 'scheduler'}:news",
+                )
             self.news_scheduler = WatchlistNewsScheduler(
                 service=self.news_monitor_service,
                 send_callback=self.notifier.send,
                 analyze_callback=_news_analyze_callback,
+                persist_callback=_persist_news_digest,
             )
         except Exception as exc:
             logger.warning("WatchlistNewsMonitor disabled: %s", exc)
         self.live_trading_agent = create_live_trading_agent(self.orchestrator.broker_config)
         self.agent = create_trading_agent(self.orchestrator)
-        self.team = create_alerts_trading_team(self.orchestrator, self.alert_system, self.news_monitor_service)
+        self.team = create_alerts_trading_team(
+            self.orchestrator,
+            self.alert_system,
+            self.news_monitor_service,
+            memory_repo=self.memory_repo,
+            coordination_repo=self.coordination_repo,
+            agno_db=self.agno_team_db,
+        )
 
     def start_background(self) -> None:
         if self.stream_manager is not None:

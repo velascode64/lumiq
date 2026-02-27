@@ -1,5 +1,5 @@
-# Dependencias para testing
 pytest>=7.0.0
 pytest-cov>=4.0.0
 pytest-mock>=3.10.0
 pytest-asyncio>=0.20.0
+pytest-postgresql>=5.0.0

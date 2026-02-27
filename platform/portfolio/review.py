@@ -146,14 +146,26 @@ class WatchlistConfig:
 
 
 class WatchlistStore:
-    def __init__(self, path: Optional[Path] = None):
+    def __init__(self, path: Optional[Path] = None, repo: Optional[Any] = None):
+        self.repo = repo
         default_path = Path(__file__).resolve().parent / "portfolio" / "data" / "watchlist.json"
         self.path = Path(path or default_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
+        if self.repo is None and not self.path.exists():
             self.save(WatchlistConfig().normalize())
 
     def load(self) -> WatchlistConfig:
+        if self.repo is not None:
+            try:
+                raw = self.repo.load_config_dict()
+                cfg = WatchlistConfig(
+                    groups=raw.get("groups") or {},
+                    favorites=raw.get("favorites") or [],
+                    benchmarks=raw.get("benchmarks") or {},
+                )
+                return cfg.normalize()
+            except Exception as exc:
+                logger.warning("Failed to load watchlist from DB repo: %s", exc)
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             if "groups" in raw or "favorites" in raw or "benchmarks" in raw:
@@ -174,6 +186,18 @@ class WatchlistStore:
 
     def save(self, config: WatchlistConfig) -> None:
         config = config.normalize()
+        if self.repo is not None:
+            try:
+                self.repo.save_config_dict(
+                    {
+                        "groups": config.groups,
+                        "favorites": config.favorites,
+                        "benchmarks": config.benchmarks,
+                    }
+                )
+                return
+            except Exception as exc:
+                logger.warning("Failed to save watchlist to DB repo, falling back to file: %s", exc)
         payload = {
             "groups": config.groups,
             "favorites": config.favorites,
@@ -182,6 +206,14 @@ class WatchlistStore:
         self.path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
 
     def add_ticker(self, ticker: str, groups: Optional[Sequence[str]] = None, favorite: bool = False) -> Dict[str, Any]:
+        if self.repo is not None:
+            sym = _normalize_symbol(ticker)
+            if not sym:
+                raise ValueError("ticker vacío")
+            assigned_groups = [str(g).strip().lower() for g in (groups or []) if str(g).strip()]
+            if not assigned_groups:
+                assigned_groups = ["favorites"] if favorite else ["ungrouped"]
+            return self.repo.upsert_ticker(sym, assigned_groups, favorite=favorite)
         cfg = self.load()
         sym = _normalize_symbol(ticker)
         if not sym:
@@ -202,6 +234,11 @@ class WatchlistStore:
         return self.add_ticker(ticker, groups=["favorites"], favorite=True)
 
     def remove_group(self, group_name: str) -> Dict[str, Any]:
+        if self.repo is not None:
+            group = str(group_name or "").strip().lower()
+            if not group:
+                raise ValueError("group_name vacío")
+            return self.repo.remove_group(group)
         cfg = self.load()
         group = str(group_name or "").strip().lower()
         if not group:
@@ -217,6 +254,11 @@ class WatchlistStore:
         group_name: Optional[str] = None,
         from_favorites: bool = False,
     ) -> Dict[str, Any]:
+        if self.repo is not None:
+            sym = _normalize_symbol(ticker)
+            if not sym:
+                raise ValueError("ticker vacío")
+            return self.repo.remove_ticker(sym, group_name=group_name, from_favorites=from_favorites)
         cfg = self.load()
         sym = _normalize_symbol(ticker)
         if not sym:
@@ -743,10 +785,12 @@ class PortfolioReviewScheduler:
         review_service: PortfolioReviewService,
         send_callback: Callable[[int, str], None],
         chat_ids: Optional[Sequence[int]] = None,
+        persist_callback: Optional[Callable[..., None]] = None,
     ):
         self.review_service = review_service
         self.send_callback = send_callback
         self.chat_ids: List[int] = [int(c) for c in (chat_ids or _parse_chat_ids_from_env())]
+        self.persist_callback = persist_callback
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="portfolio-review")
@@ -832,6 +876,17 @@ class PortfolioReviewScheduler:
             text = self.review_service.generate_report_text(report_kind, include_benchmark=True, group_name=group_name)
             prefix = f"[{source}] " if source else ""
             final_text = prefix + text
+            if self.persist_callback is not None:
+                try:
+                    self.persist_callback(
+                        report_kind=report_kind,
+                        text=final_text,
+                        source=source,
+                        group_name=group_name,
+                        chat_id=chat_id,
+                    )
+                except Exception as exc:
+                    logger.exception("Failed to persist portfolio report (%s): %s", report_kind, exc)
             target_ids = [int(chat_id)] if chat_id is not None else list(self.chat_ids)
             if not target_ids:
                 logger.warning("Portfolio report generated but no Telegram chat_ids configured")

@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -123,6 +124,9 @@ class ChatService:
     def __init__(self, runtime):
         self.runtime = runtime
         self._chat_trade_mode: Dict[int, str] = {}
+        self._chat_ctx_repo = getattr(runtime, "chat_context_repo", None)
+        self._coordination_repo = getattr(runtime, "coordination_repo", None)
+        self._memory_repo = getattr(runtime, "memory_repo", None)
 
     def _get_trade_mode(self, chat_id: int) -> str:
         return self._chat_trade_mode.get(int(chat_id), "paper")
@@ -150,6 +154,140 @@ class ChatService:
             "If side + symbol + amount/qty are explicit, execute without asking for confirmation.\n"
             f"User request: {text}"
         )
+
+    def _infer_domain(self, text: str) -> Optional[str]:
+        lower = (text or "").lower()
+        if any(k in lower for k in {"rsi", "macd", "bollinger", "soporte", "resistencia", "overbought", "oversold", "technicals"}):
+            return "technicals"
+        if any(k in lower for k in {"alerta", "alert", "avísame", "avisame"}):
+            return "alerts"
+        if any(k in lower for k in {"news", "noticia", "noticias", "headline", "catalyst"}):
+            return "news"
+        if any(k in lower for k in {"buy", "sell", "compra", "vende", "close", "cancel"}):
+            return "live_trading"
+        if any(k in lower for k in {"strategy", "estrategia", "backtest", "pnl", "running"}):
+            return "strategy_ops"
+        if any(k in lower for k in {"watchlist", "favorito", "grupo"}):
+            return "watchlist"
+        return None
+
+    def _is_technical_intent(self, text: str) -> bool:
+        lower = (text or "").lower()
+        technical_terms = {
+            "rsi",
+            "macd",
+            "bollinger",
+            "soporte",
+            "resistencia",
+            "support",
+            "resistance",
+            "overbought",
+            "oversold",
+            "touch",
+            "toco",
+            "tocó",
+            "bounce",
+            "rebote",
+            "breakdown",
+            "breakout",
+            "technicals",
+            "analisis tecnico",
+            "análisis técnico",
+            "technical analysis",
+            "price level",
+            "cuantas veces",
+            "cuántas veces",
+        }
+        return any(term in lower for term in technical_terms)
+
+    def _extract_group_name(self, text: str) -> Optional[str]:
+        m = re.search(r"grupo\s+([A-Za-z0-9_-]+)", text or "", flags=re.IGNORECASE)
+        return m.group(1).strip().lower() if m else None
+
+    def _context_prefix(self, chat_id: int, text: str) -> str:
+        if self._chat_ctx_repo is None:
+            return text
+        try:
+            # Keep context compact to reduce token and latency overhead.
+            state = self._chat_ctx_repo.get_chat_state(int(chat_id))
+        except Exception as exc:
+            logger.debug("chat context summary unavailable: %s", exc)
+            state = None
+        if not state:
+            return text
+        requested_domain = self._infer_domain(text)
+        symbol_from_state = state.get("active_symbol")
+        if requested_domain == "technicals":
+            # Strict technical context policy:
+            # only propagate a validated symbol present in the current user message.
+            current_symbols = self._extract_valid_symbols_for_analysis(text)
+            symbol_from_state = current_symbols[0] if current_symbols else None
+        elif symbol_from_state and not self._is_likely_ticker_format(str(symbol_from_state)):
+            symbol_from_state = None
+        lines = ["Persisted chat context (state):"]
+        if state.get("active_domain"):
+            lines.append(f"- active_domain: {state['active_domain']}")
+        if symbol_from_state:
+            lines.append(f"- active_symbol: {symbol_from_state}")
+        if state.get("active_group"):
+            lines.append(f"- active_group: {state['active_group']}")
+        if state.get("timeframe"):
+            lines.append(f"- timeframe: {state['timeframe']}")
+        lines.append("")
+        lines.append("Current user request:")
+        lines.append(text)
+        return "\n".join(lines)
+
+    def _persist_turn(self, chat_id: int, user_id: int, role: str, content: str, meta: Optional[Dict[str, Any]] = None) -> None:
+        if self._chat_ctx_repo is None:
+            return
+        try:
+            self._chat_ctx_repo.append_turn(
+                chat_id=int(chat_id),
+                user_id=int(user_id) if role == "user" else None,
+                role=role,
+                content=content,
+                meta=meta or {},
+            )
+        except Exception:
+            logger.exception("Failed to persist chat turn")
+
+    def _persist_chat_state(self, chat_id: int, user_id: int, text: str, response_text: Optional[str] = None) -> None:
+        if self._chat_ctx_repo is None:
+            return
+        try:
+            symbols = self._extract_valid_symbols_for_analysis(text)
+            active_symbol = symbols[0] if symbols else None
+            active_group = self._extract_group_name(text)
+            timeframe = None
+            lower = text.lower()
+            if "4h" in lower:
+                timeframe = "4H"
+            elif "1d" in lower or "diario" in lower or "daily" in lower:
+                timeframe = "1D"
+            domain = self._infer_domain(text)
+            self._chat_ctx_repo.upsert_chat_state(
+                chat_id=int(chat_id),
+                user_id=int(user_id),
+                active_domain=domain,
+                active_symbol=active_symbol,
+                active_group=active_group,
+                timeframe=timeframe,
+                context_json={"last_user_text": text, "last_response_text": (response_text or "")[:500]},
+            )
+            # Minimal shared-memory fact persistence for strong signals (helps cross-agent continuity)
+            if self._memory_repo is not None and active_symbol and domain in {"technicals", "news", "alerts"}:
+                self._memory_repo.remember_fact(
+                    category="chat_context",
+                    key=f"last_topic:{domain}",
+                    value=f"Recent user discussion about {active_symbol}",
+                    source="chat_service",
+                    team_name="TradingAlertTeam",
+                    symbol=active_symbol,
+                    confidence=0.6,
+                )
+        except Exception:
+            logger.exception("Failed to persist chat state")
 
     def examples_text(self, agent: Optional[str] = None) -> str:
         key = (agent or "all").strip().lower()
@@ -325,6 +463,7 @@ class ChatService:
     def _extract_symbols(self, text: str) -> List[str]:
         alias_map = {
             "NVIDIA": "NVDA",
+            "NVDA": "NVDA",
             "CLOUDFLARE": "NET",
             "CLOUCLDFLARE": "NET",
             "ZSCALER": "ZS",
@@ -338,24 +477,101 @@ class ChatService:
             "NETFLIX": "NFLX",
             "UBER": "UBER",
             "OKTA": "OKTA",
+            "BITCOIN": "BTC/USD",
+            "ETHEREUM": "ETH/USD",
+            "BTC": "BTC/USD",
+            "ETH": "ETH/USD",
         }
         stopwords = {
             "RSI", "OVERBOUGHT", "OVERSOLD", "SOBRECOMPRADA", "SOBRECOMPRADO",
             "SOBREVENDIDA", "SOBREVENDIDO", "PARA", "QUIERO", "CREA", "ALERTA",
             "EL", "LA", "LOS", "LAS", "Y", "AND", "DE", "DEL", "EN", "UN", "UNA",
             "NUEVO", "NUEVA", "STOCKS", "STOCK", "ACCIONES", "ACCION",
+            "AGREGA", "AGREGAR", "TICKER", "TICKERS", "WATCHLIST",
+            "GRUPO", "GRUPOS", "FAVORITO", "FAVORITOS", "QUE", "CUANTAS", "CUANTOS",
+            "VECES", "CAIDO", "CAIDA", "REVISA", "ANALIZA", "ANALISIS", "TECNICO",
+            "TECNICOS", "TECHNICAL", "TECHNICALS", "EARNINGS", "DESPUES", "AYER",
+            "HOY", "PRECIO", "NIVEL", "SOPORTE", "RESISTENCIA", "FAANG", "FANG",
         }
+        raw = text or ""
         symbols: List[str] = []
-        for token in re.findall(r"\b[A-Za-z]{2,6}[/-][A-Za-z]{2,6}\b", text):
-            symbols.append(token.upper().replace("-", "/"))
-        for token in re.findall(r"\b[A-Za-z]{2,16}\b", text):
+
+        def _push(candidate: str) -> None:
+            sym = (candidate or "").strip().upper().replace("-", "/")
+            if not sym or sym in stopwords:
+                return
+            if sym not in symbols:
+                symbols.append(sym)
+
+        # Explicit crypto/forex-like symbols.
+        for token in re.findall(r"\b[A-Za-z]{2,10}[/-][A-Za-z]{2,10}\b", raw):
+            _push(token)
+
+        # $TICKER mentions.
+        for token in re.findall(r"\$([A-Za-z]{1,5}(?:\.[A-Za-z])?)\b", raw):
+            _push(token)
+
+        # Uppercase ticker-like tokens from user text.
+        for token in re.findall(r"\b[A-Z]{1,5}(?:\.[A-Z])?\b", raw):
+            _push(alias_map.get(token, token))
+
+        # Company-name aliases in any case.
+        for token in re.findall(r"\b[A-Za-z][A-Za-z0-9.&-]{1,24}\b", raw):
             upper = token.upper()
-            if upper in stopwords:
-                continue
-            mapped = alias_map.get(upper, upper)
-            if mapped not in symbols and mapped.isalpha():
-                symbols.append(mapped)
+            mapped = alias_map.get(upper)
+            if mapped:
+                _push(mapped)
+
         return symbols
+
+    def _is_likely_ticker_format(self, symbol: str) -> bool:
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            return False
+        if "/" in sym:
+            return bool(re.fullmatch(r"[A-Z]{2,10}/[A-Z]{2,10}", sym))
+        if "." in sym:
+            return bool(re.fullmatch(r"[A-Z]{1,5}\.[A-Z]", sym))
+        return bool(re.fullmatch(r"[A-Z]{1,5}", sym))
+
+    def _validate_watchlist_symbols(self, symbols: List[str]) -> tuple[List[str], List[str]]:
+        """
+        Deterministic validation for watchlist symbols using Alpaca data service.
+        - First gate by ticker-like format
+        - Then validate via latest price or short bars availability
+        """
+        if not symbols:
+            return [], []
+        data_service = getattr(getattr(self.runtime, "alert_system", None), "data_service", None)
+        valid: List[str] = []
+        invalid: List[str] = []
+
+        for sym in symbols:
+            ticker = (sym or "").strip().upper().replace("-", "/")
+            if not self._is_likely_ticker_format(ticker):
+                invalid.append(ticker)
+                continue
+            if data_service is None:
+                valid.append(ticker)
+                continue
+            try:
+                price = data_service.get_latest_price(ticker)
+                if price is not None:
+                    valid.append(ticker)
+                    continue
+                bars = data_service.get_stock_bars(ticker, days=5)
+                if bars is not None and not bars.empty:
+                    valid.append(ticker)
+                else:
+                    invalid.append(ticker)
+            except Exception:
+                invalid.append(ticker)
+        return valid, invalid
+
+    def _extract_valid_symbols_for_analysis(self, text: str) -> List[str]:
+        symbols = self._extract_symbols(text)
+        valid, _ = self._validate_watchlist_symbols(symbols)
+        return valid
 
     def _maybe_handle_rsi_natural_language(self, text: str, chat_id: int) -> Optional[str]:
         alert_system = self.runtime.alert_system
@@ -367,7 +583,10 @@ class ChatService:
         if not is_oversold and not is_overbought:
             return None
         symbols = self._extract_symbols(text)
+        symbols, invalid_symbols = self._validate_watchlist_symbols(symbols)
         if not symbols:
+            if invalid_symbols:
+                return "No encontré símbolos válidos para RSI alert. Revisa: " + ", ".join(invalid_symbols[:10])
             return "Dime el simbolo (ej: PLTR, NVDA) para crear la alerta RSI."
         created: List[Dict[str, Any]] = []
         for index, symbol in enumerate(symbols):
@@ -376,7 +595,10 @@ class ChatService:
             rule["chat_id"] = int(chat_id)
             created.append(alert_system.add_rule(rule))
         kind = "oversold" if is_oversold and not is_overbought else "overbought"
-        return "RSI " + kind + " creado para: " + ", ".join(str(r.get("symbol")) for r in created)
+        suffix = ""
+        if invalid_symbols:
+            suffix = " | ignorados por inválidos: " + ", ".join(invalid_symbols[:10])
+        return "RSI " + kind + " creado para: " + ", ".join(str(r.get("symbol")) for r in created) + suffix
 
     def _maybe_handle_watchlist_natural_language(self, text: str) -> Optional[str]:
         store = getattr(self.runtime, "watchlist_store", None)
@@ -420,6 +642,8 @@ class ChatService:
             "listado", "lista", "listar", "muestra", "muéstra", "muestr",
             "favoritos", "favorirtos",
         })
+        if re.search(r"\b(list|show|listado|lista|listar)\b.*\b(watchlist|favorit|grupo)\b", lower):
+            list_like = True
         modify_like = any(token in lower for token in {"crea", "crear", "agrega", "añade", "anade"})
         if list_like and not modify_like:
             # "que watchlist tenemos", "listado de favoritos", etc.
@@ -429,7 +653,12 @@ class ChatService:
             or (("grupo" in lower or "grupos" in lower) and any(t in lower for t in {"tienes", "hay", "lista", "listar", "muestr"}))
         ):
             return store.summary_text()
-        is_create_group = ("grupo" in lower) and any(t in lower for t in {"crea", "crear", "agrega", "añade", "anade"})
+        has_add_verb = any(t in lower for t in {"crea", "crear", "agrega", "añade", "anade", "add"})
+        is_create_group = ("grupo" in lower) and has_add_verb
+        if not is_create_group and has_add_verb and "watchlist" in lower:
+            # Support natural phrases like:
+            # "agrega el watchlist FAANG los tickers (GOOG, QQQ, META)"
+            is_create_group = True
         is_add_fav = any(t in lower for t in {"favoritos", "favorito"}) and any(t in lower for t in {"agrega", "añade", "anade", "crea", "crear"})
         if not is_create_group and not is_add_fav:
             return None
@@ -444,6 +673,12 @@ class ChatService:
                 candidate = m2.group(1).strip().lower()
                 if candidate not in {"con", "las", "los", "siguientes", "stocks", "acciones"}:
                     group_name = candidate
+        if is_create_group and not group_name:
+            m3 = re.search(r"watchlist\s+([A-Za-z0-9_-]+)", text, flags=re.IGNORECASE)
+            if m3:
+                candidate = m3.group(1).strip().lower()
+                if candidate not in {"con", "las", "los", "siguientes", "stocks", "acciones", "tickers"}:
+                    group_name = candidate
 
         symbols = self._extract_symbols(text)
         noise = {
@@ -456,7 +691,10 @@ class ChatService:
         # De-duplicate preserving order
         seen = set()
         symbols = [s for s in symbols if not (s in seen or seen.add(s))]
+        symbols, invalid_symbols = self._validate_watchlist_symbols(symbols)
         if not symbols:
+            if invalid_symbols:
+                return "No encontré tickers válidos para agregar. Revisa estos valores: " + ", ".join(invalid_symbols[:10])
             return None
 
         if is_create_group:
@@ -471,7 +709,10 @@ class ChatService:
                     continue
             if not added:
                 return "No pude agregar tickers al grupo."
-            return f"Grupo '{group_name}' actualizado con {len(added)} tickers: " + ", ".join(added)
+            suffix = ""
+            if invalid_symbols:
+                suffix = " | ignorados por inválidos: " + ", ".join(invalid_symbols[:10])
+            return f"Grupo '{group_name}' actualizado con {len(added)} tickers: " + ", ".join(added) + suffix
 
         if is_add_fav:
             added = []
@@ -482,8 +723,156 @@ class ChatService:
                 except Exception:
                     continue
             if added:
-                return "Favoritos actualizados: " + ", ".join(added)
+                suffix = ""
+                if invalid_symbols:
+                    suffix = " | ignorados por inválidos: " + ", ".join(invalid_symbols[:10])
+                return "Favoritos actualizados: " + ", ".join(added) + suffix
         return None
+
+    def _maybe_handle_alert_natural_language(self, chat_id: int, text: str) -> Optional[str]:
+        alert_system = self.runtime.alert_system
+        if alert_system is None:
+            return None
+        lower = text.lower()
+        if not any(k in lower for k in {"alerta", "alert", "alaerta", "avísame", "avisame"}):
+            return None
+
+        # list alerts
+        if any(k in lower for k in {"listar", "lista", "list", "muestra", "muéstra", "show"}):
+            return self.get_alerts_summary(chat_id)
+
+        # remove alert by id
+        if any(k in lower for k in {"elimina", "borra", "quita", "remove", "delete"}):
+            m_id = re.search(r"(?:id|alerta)\s*[:#]?\s*([A-Za-z0-9_-]{8,})", text, flags=re.IGNORECASE)
+            if not m_id:
+                return "Indica el id de la alerta para eliminarla (ej: elimina alerta <id>)."
+            rid = m_id.group(1).strip()
+            ok = alert_system.remove_rule(rid)
+            return f"Alerta {rid} eliminada." if ok else f"No encontré la alerta {rid}."
+
+        symbols = self._extract_symbols(text)
+        symbols, invalid_symbols = self._validate_watchlist_symbols(symbols)
+        if not symbols:
+            if invalid_symbols:
+                return "No encontré símbolos válidos para crear la alerta. Revisa: " + ", ".join(invalid_symbols[:10])
+            return "Dime el símbolo para crear la alerta (ej: ETH/USD, BTC/USD, AAPL)."
+        symbol = symbols[0]
+
+        # percent drop/rise
+        m_pct = re.search(r"(\d+(?:[.,]\d+)?)\s*%", lower)
+        if m_pct and any(k in lower for k in {"baje", "caiga", "drop", "down"}):
+            pct = float(m_pct.group(1).replace(",", ".")) / 100.0
+            rule = {
+                "id": str(uuid.uuid4()),
+                "symbol": symbol,
+                "type": "percent_drop",
+                "threshold": pct,
+                "active": True,
+                "chat_id": int(chat_id),
+                "cooldown_seconds": 300,
+                "last_triggered_at": None,
+            }
+            created = alert_system.add_rule(rule)
+            suffix = ""
+            if invalid_symbols:
+                suffix = " | ignorados por inválidos: " + ", ".join(invalid_symbols[:10])
+            return f"Alerta creada: {created.get('symbol')} caída {float(pct)*100:.2f}% (id: {created.get('id')})." + suffix
+        if m_pct and any(k in lower for k in {"suba", "sube", "rise", "up"}):
+            pct = float(m_pct.group(1).replace(",", ".")) / 100.0
+            rule = {
+                "id": str(uuid.uuid4()),
+                "symbol": symbol,
+                "type": "percent_rise",
+                "threshold": pct,
+                "active": True,
+                "chat_id": int(chat_id),
+                "cooldown_seconds": 300,
+                "last_triggered_at": None,
+            }
+            created = alert_system.add_rule(rule)
+            suffix = ""
+            if invalid_symbols:
+                suffix = " | ignorados por inválidos: " + ", ".join(invalid_symbols[:10])
+            return f"Alerta creada: {created.get('symbol')} subida {float(pct)*100:.2f}% (id: {created.get('id')})." + suffix
+
+        # target price
+        m_price = re.search(r"(?:llegue|toque|cuando|at)\s*(?:a\s*)?\$?\s*(\d+(?:[.,]\d+)?)", lower)
+        if m_price:
+            target = float(m_price.group(1).replace(",", "."))
+            rule = {
+                "id": str(uuid.uuid4()),
+                "symbol": symbol,
+                "type": "target_price",
+                "target": target,
+                "active": True,
+                "chat_id": int(chat_id),
+                "cooldown_seconds": 300,
+                "last_triggered_at": None,
+            }
+            created = alert_system.add_rule(rule)
+            suffix = ""
+            if invalid_symbols:
+                suffix = " | ignorados por inválidos: " + ", ".join(invalid_symbols[:10])
+            return f"Alerta creada: {created.get('symbol')} target ${target:,.2f} (id: {created.get('id')})." + suffix
+
+        return "Puedo crear alertas de caída/subida por porcentaje o target de precio. Ej: 'alerta ETH/USD cuando baje 1%'."
+
+    def _maybe_handle_alert_option_reply(self, chat_id: int, text: str) -> Optional[str]:
+        """
+        Fast follow-up for technical recommendations that include:
+        Option 1: alert ...
+        Option 2: alert ...
+        """
+        if self._chat_ctx_repo is None:
+            return None
+        lower = (text or "").strip().lower()
+        if not lower:
+            return None
+
+        choice: Optional[int] = None
+        if lower in {"1", "option 1", "opcion 1", "opción 1"}:
+            choice = 1
+        elif lower in {"2", "option 2", "opcion 2", "opción 2"}:
+            choice = 2
+        elif lower in {"yes", "si", "sí", "ok", "dale", "hazlo", "go"}:
+            choice = 1
+        else:
+            return None
+
+        try:
+            turns = self._chat_ctx_repo.get_recent_turns(chat_id=int(chat_id), limit=6)
+        except Exception:
+            return None
+        if not turns:
+            return None
+
+        last_assistant = None
+        for t in reversed(turns):
+            if str(t.get("role", "")).lower() == "assistant":
+                last_assistant = str(t.get("content") or "")
+                break
+        if not last_assistant:
+            return None
+        if "Suggested Alerts" not in last_assistant and "Option 1:" not in last_assistant:
+            return None
+
+        options: Dict[int, str] = {}
+        for m in re.finditer(r"Option\s+([12])\s*:\s*(.+)", last_assistant, flags=re.IGNORECASE):
+            idx = int(m.group(1))
+            cmd = m.group(2).strip()
+            if cmd:
+                options[idx] = cmd
+        if not options:
+            return None
+
+        selected = options.get(choice) or options.get(1)
+        if not selected:
+            return None
+
+        created = self._maybe_handle_alert_natural_language(chat_id, selected)
+        if created is None:
+            return "No pude crear la alerta desde la recomendación. Dime el formato exacto, por ejemplo: alerta NVDA cuando baje 2%."
+        return created
 
     def _maybe_handle_report_natural_language(self, chat_id: int, text: str) -> Optional[str]:
         scheduler = getattr(self.runtime, "portfolio_review_scheduler", None)
@@ -704,19 +1093,49 @@ class ChatService:
         return ChatResponse("Unknown command. Use /help")
 
     def handle_chat(self, chat_id: int, user_id: int, text: str) -> ChatResponse:
+        self._persist_turn(chat_id, user_id, "user", text)
+
         watchlist_response = self._maybe_handle_watchlist_natural_language(text)
         if watchlist_response is not None:
+            self._persist_turn(chat_id, user_id, "assistant", watchlist_response)
+            self._persist_chat_state(chat_id, user_id, text, watchlist_response)
             return ChatResponse(watchlist_response, parse_mode=None)
+
+        alert_response = self._maybe_handle_alert_natural_language(chat_id, text)
+        if alert_response is not None:
+            self._persist_turn(chat_id, user_id, "assistant", alert_response)
+            self._persist_chat_state(chat_id, user_id, text, alert_response)
+            return ChatResponse(alert_response, parse_mode=None)
+
+        alert_option_response = self._maybe_handle_alert_option_reply(chat_id, text)
+        if alert_option_response is not None:
+            self._persist_turn(chat_id, user_id, "assistant", alert_option_response)
+            self._persist_chat_state(chat_id, user_id, text, alert_option_response)
+            return ChatResponse(alert_option_response, parse_mode=None)
 
         report_response = self._maybe_handle_report_natural_language(chat_id, text)
         if report_response is not None:
+            self._persist_turn(chat_id, user_id, "assistant", report_response)
+            self._persist_chat_state(chat_id, user_id, text, report_response)
             return ChatResponse(report_response, parse_mode=None)
 
         if self.runtime.alert_system is not None:
             self.runtime.alert_system.set_active_chat_id(chat_id)
             rsi_response = self._maybe_handle_rsi_natural_language(text, chat_id)
             if rsi_response is not None:
+                self._persist_turn(chat_id, user_id, "assistant", rsi_response)
+                self._persist_chat_state(chat_id, user_id, text, rsi_response)
                 return ChatResponse(rsi_response, parse_mode=None)
+
+        # Strict technical context policy:
+        # technical requests require a validated symbol in the current message.
+        if self._is_technical_intent(text):
+            valid_symbols = self._extract_valid_symbols_for_analysis(text)
+            if not valid_symbols:
+                clarification = "Which symbol should I analyze? (e.g., NVDA, ETH/USD)."
+                self._persist_turn(chat_id, user_id, "assistant", clarification)
+                self._persist_chat_state(chat_id, user_id, text, clarification)
+                return ChatResponse(clarification, parse_mode=None)
 
         live_trading_agent = getattr(self.runtime, "live_trading_agent", None)
         if live_trading_agent is not None and self._is_trade_intent_text(text):
@@ -728,30 +1147,39 @@ class ChatService:
                 session_id=session_id,
                 trade_execution_mode=self._get_trade_mode(chat_id),
             )
+            self._persist_turn(chat_id, user_id, "assistant", response)
+            self._persist_chat_state(chat_id, user_id, text, response)
             return ChatResponse(response, parse_mode=None)
 
         if self.runtime.team is not None:
             session_id = f"telegram-{chat_id}"
             response = run_team_message(
                 self.runtime.team,
-                self._apply_trade_mode_policy(chat_id, text),
+                self._context_prefix(chat_id, self._apply_trade_mode_policy(chat_id, text)),
                 user_id=str(user_id),
                 session_id=session_id,
             )
+            self._persist_turn(chat_id, user_id, "assistant", response)
+            self._persist_chat_state(chat_id, user_id, text, response)
             return ChatResponse(response, parse_mode=None)
 
         if self.runtime.agent is not None:
             session_id = f"telegram-{chat_id}"
             response = run_agent_message(
                 self.runtime.agent,
-                text,
+                self._context_prefix(chat_id, text),
                 user_id=str(user_id),
                 session_id=session_id,
                 trade_execution_mode=self._get_trade_mode(chat_id),
             )
+            self._persist_turn(chat_id, user_id, "assistant", response)
+            self._persist_chat_state(chat_id, user_id, text, response)
             return ChatResponse(response, parse_mode=None)
 
-        return ChatResponse("Conversational mode requires OPENAI_API_KEY or ANTHROPIC_API_KEY.", parse_mode=None)
+        fallback = "Conversational mode requires OPENAI_API_KEY or ANTHROPIC_API_KEY."
+        self._persist_turn(chat_id, user_id, "assistant", fallback)
+        self._persist_chat_state(chat_id, user_id, text, fallback)
+        return ChatResponse(fallback, parse_mode=None)
 
     def handle_text(self, chat_id: int, user_id: int, text: str) -> ChatResponse:
         text = (text or "").strip()

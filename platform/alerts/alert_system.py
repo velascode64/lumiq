@@ -8,6 +8,7 @@ Coordinates data fetching, analysis, and notifications.
 import logging
 import time
 import os
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -74,6 +75,8 @@ class AlertSystem:
         secret_key: Optional[str] = None,
         telegram_token: Optional[str] = None,
         telegram_chat_id: Optional[str] = None,
+        alerts_store_override=None,
+        portfolio_store_override=None,
     ):
         """
         Initialize the alert system.
@@ -109,8 +112,8 @@ class AlertSystem:
 
         # Persistence
         core_dir = Path(__file__).resolve().parents[1]
-        self._alerts_store = alert_rules_store(core_dir / "alerts" / "data" / "alert_rules.json")
-        self._portfolio_store = portfolio_store(core_dir / "alerts" / "data" / "portfolio.json")
+        self._alerts_store = alerts_store_override or alert_rules_store(core_dir / "alerts" / "data" / "alert_rules.json")
+        self._portfolio_store = portfolio_store_override or portfolio_store(core_dir / "alerts" / "data" / "portfolio.json")
 
         # Ensure files exist
         self._alerts_store.read()
@@ -320,6 +323,8 @@ class AlertSystem:
     def add_rule(self, rule: Dict[str, Any]) -> Dict[str, Any]:
         data = self._alerts_store.read()
         rules = data.get("rules", [])
+        if not rule.get("id"):
+            rule["id"] = str(uuid.uuid4())
         if rule.get("chat_id") is None and self._active_chat_id is not None:
             rule["chat_id"] = int(self._active_chat_id)
         if rule.get("chat_id") is None:
@@ -334,6 +339,11 @@ class AlertSystem:
         data["rules"] = rules
         data["updated_at"] = datetime.now().isoformat()
         self._alerts_store.write(data)
+        if hasattr(self._alerts_store, "log_event"):
+            try:
+                self._alerts_store.log_event(rule.get("id"), rule.get("symbol"), "created", payload=rule)
+            except Exception:
+                logger.exception("Failed to log alert created event")
         if self._stream_manager is not None:
             try:
                 self._stream_manager.refresh_subscriptions()
@@ -349,6 +359,11 @@ class AlertSystem:
                 r.update(updates)
                 data["updated_at"] = datetime.now().isoformat()
                 self._alerts_store.write(data)
+                if hasattr(self._alerts_store, "log_event"):
+                    try:
+                        self._alerts_store.log_event(rule_id, r.get("symbol"), "updated", payload=updates)
+                    except Exception:
+                        logger.exception("Failed to log alert updated event")
                 if self._stream_manager is not None:
                     try:
                         self._stream_manager.refresh_subscriptions()
@@ -366,6 +381,11 @@ class AlertSystem:
         data["rules"] = new_rules
         data["updated_at"] = datetime.now().isoformat()
         self._alerts_store.write(data)
+        if hasattr(self._alerts_store, "log_event"):
+            try:
+                self._alerts_store.log_event(rule_id, None if not new_rules else next((x.get("symbol") for x in rules if x.get("id")==rule_id), None), "removed", payload={"rule_id": rule_id})
+            except Exception:
+                logger.exception("Failed to log alert removed event")
         if self._stream_manager is not None:
             try:
                 self._stream_manager.refresh_subscriptions()
