@@ -4,7 +4,10 @@ Telegram polling client that forwards messages to Lumiq Core API.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -49,6 +52,29 @@ class ApiTelegramBot:
                 else:
                     raise
 
+    def _send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        try:
+            self._telegram_post("sendChatAction", {"chat_id": chat_id, "action": action})
+        except Exception:
+            logger.debug("Failed to send chat action", exc_info=True)
+
+    @contextmanager
+    def _typing_indicator(self, chat_id: int):
+        stop_event = threading.Event()
+
+        def _worker() -> None:
+            while not stop_event.is_set():
+                self._send_chat_action(chat_id, action="typing")
+                stop_event.wait(4.0)
+
+        thread = threading.Thread(target=_worker, name=f"telegram-typing-{chat_id}", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop_event.set()
+            thread.join(timeout=1.0)
+
     def _forward_to_core(self, chat_id: int, user_id: int, text: str) -> Dict[str, Any]:
         response = requests.post(
             f"{self.core_api_base_url}/chat/message",
@@ -71,7 +97,8 @@ class ApiTelegramBot:
         if chat_id is None:
             return
 
-        reply = self._forward_to_core(chat_id=int(chat_id), user_id=int(user_id or chat_id), text=text)
+        with self._typing_indicator(int(chat_id)):
+            reply = self._forward_to_core(chat_id=int(chat_id), user_id=int(user_id or chat_id), text=text)
         self._send_message(chat_id=int(chat_id), text=reply.get("text", ""), parse_mode=reply.get("parse_mode"))
 
     def run(self) -> None:
@@ -88,4 +115,3 @@ class ApiTelegramBot:
                 break
             except Exception as exc:
                 logger.exception("Telegram polling client error: %s", exc)
-

@@ -578,19 +578,41 @@ class ChatService:
         if alert_system is None:
             return None
         lower = text.lower()
+        if "rsi" not in lower:
+            return None
         is_oversold = any(t in lower for t in {"oversold", "sobrevendida", "sobrevendido"})
         is_overbought = any(t in lower for t in {"overbought", "sobrecomprada", "sobrecomprado"})
+
+        threshold_match = re.search(
+            r"rsi(?:\s*(?:is|de|of))?\s*(?:>=|=>|>|mayor\s+a|above|over|at|reaches|reach|llega\s+a|toque|toca)?\s*(\d+(?:[.,]\d+)?)",
+            lower,
+            flags=re.IGNORECASE,
+        )
+        threshold_value: Optional[float] = None
+        if threshold_match:
+            threshold_value = float(threshold_match.group(1).replace(",", "."))
+
+        if threshold_value is not None and not is_oversold and not is_overbought:
+            if any(t in lower for t in {"<=", "=<", "<", "menor a", "below", "under", "falls to", "cae a", "baja a"}):
+                is_oversold = True
+            else:
+                is_overbought = True
+
         if not is_oversold and not is_overbought:
+            # No explicit technical RSI condition recognized; let the Team resolve it.
             return None
+
         symbols = self._extract_symbols(text)
         symbols, invalid_symbols = self._validate_watchlist_symbols(symbols)
         if not symbols:
-            if invalid_symbols:
-                return "No encontré símbolos válidos para RSI alert. Revisa: " + ", ".join(invalid_symbols[:10])
-            return "Dime el simbolo (ej: PLTR, NVDA) para crear la alerta RSI."
+            return None
         created: List[Dict[str, Any]] = []
         for index, symbol in enumerate(symbols):
-            rule = create_rsi_oversold(symbol) if is_oversold and not is_overbought else create_rsi_overbought(symbol)
+            threshold = float(threshold_value) if threshold_value is not None else (30.0 if is_oversold and not is_overbought else 70.0)
+            if is_oversold and not is_overbought:
+                rule = create_rsi_oversold(symbol, threshold=threshold)
+            else:
+                rule = create_rsi_overbought(symbol, threshold=threshold)
             rule["id"] = f"{symbol}-{int(time.time())}-{index}"
             rule["chat_id"] = int(chat_id)
             created.append(alert_system.add_rule(rule))
@@ -745,7 +767,7 @@ class ChatService:
         if any(k in lower for k in {"elimina", "borra", "quita", "remove", "delete"}):
             m_id = re.search(r"(?:id|alerta)\s*[:#]?\s*([A-Za-z0-9_-]{8,})", text, flags=re.IGNORECASE)
             if not m_id:
-                return "Indica el id de la alerta para eliminarla (ej: elimina alerta <id>)."
+                return None
             rid = m_id.group(1).strip()
             ok = alert_system.remove_rule(rid)
             return f"Alerta {rid} eliminada." if ok else f"No encontré la alerta {rid}."
@@ -753,9 +775,7 @@ class ChatService:
         symbols = self._extract_symbols(text)
         symbols, invalid_symbols = self._validate_watchlist_symbols(symbols)
         if not symbols:
-            if invalid_symbols:
-                return "No encontré símbolos válidos para crear la alerta. Revisa: " + ", ".join(invalid_symbols[:10])
-            return "Dime el símbolo para crear la alerta (ej: ETH/USD, BTC/USD, AAPL)."
+            return None
         symbol = symbols[0]
 
         # percent drop/rise
@@ -815,13 +835,12 @@ class ChatService:
                 suffix = " | ignorados por inválidos: " + ", ".join(invalid_symbols[:10])
             return f"Alerta creada: {created.get('symbol')} target ${target:,.2f} (id: {created.get('id')})." + suffix
 
-        return "Puedo crear alertas de caída/subida por porcentaje o target de precio. Ej: 'alerta ETH/USD cuando baje 1%'."
+        return None
 
     def _maybe_handle_alert_option_reply(self, chat_id: int, text: str) -> Optional[str]:
         """
         Fast follow-up for technical recommendations that include:
-        Option 1: alert ...
-        Option 2: alert ...
+        Option N: ...
         """
         if self._chat_ctx_repo is None:
             return None
@@ -830,11 +849,12 @@ class ChatService:
             return None
 
         choice: Optional[int] = None
-        if lower in {"1", "option 1", "opcion 1", "opción 1"}:
-            choice = 1
-        elif lower in {"2", "option 2", "opcion 2", "opción 2"}:
-            choice = 2
-        elif lower in {"yes", "si", "sí", "ok", "dale", "hazlo", "go"}:
+        m_choice = re.match(r"^(?:option|opcion|opción)?\s*(\d+)\b", lower, flags=re.IGNORECASE)
+        if m_choice:
+            choice = int(m_choice.group(1))
+        elif lower in {"yes", "si", "sí", "ok", "dale", "hazlo", "go"} or any(
+            lower.startswith(prefix) for prefix in ("yes ", "si ", "sí ", "ok ", "dale ", "hazlo ", "go ")
+        ):
             choice = 1
         else:
             return None
@@ -857,7 +877,7 @@ class ChatService:
             return None
 
         options: Dict[int, str] = {}
-        for m in re.finditer(r"Option\s+([12])\s*:\s*(.+)", last_assistant, flags=re.IGNORECASE):
+        for m in re.finditer(r"Option\s+(\d+)\s*:\s*(.+)", last_assistant, flags=re.IGNORECASE):
             idx = int(m.group(1))
             cmd = m.group(2).strip()
             if cmd:
@@ -869,10 +889,12 @@ class ChatService:
         if not selected:
             return None
 
-        created = self._maybe_handle_alert_natural_language(chat_id, selected)
+        created = self._maybe_handle_rsi_natural_language(selected, chat_id)
         if created is None:
-            return "No pude crear la alerta desde la recomendación. Dime el formato exacto, por ejemplo: alerta NVDA cuando baje 2%."
-        return created
+            created = self._maybe_handle_alert_natural_language(chat_id, selected)
+        if created is not None:
+            return created
+        return selected
 
     def _maybe_handle_report_natural_language(self, chat_id: int, text: str) -> Optional[str]:
         scheduler = getattr(self.runtime, "portfolio_review_scheduler", None)
@@ -1101,17 +1123,17 @@ class ChatService:
             self._persist_chat_state(chat_id, user_id, text, watchlist_response)
             return ChatResponse(watchlist_response, parse_mode=None)
 
-        alert_response = self._maybe_handle_alert_natural_language(chat_id, text)
-        if alert_response is not None:
-            self._persist_turn(chat_id, user_id, "assistant", alert_response)
-            self._persist_chat_state(chat_id, user_id, text, alert_response)
-            return ChatResponse(alert_response, parse_mode=None)
-
         alert_option_response = self._maybe_handle_alert_option_reply(chat_id, text)
         if alert_option_response is not None:
             self._persist_turn(chat_id, user_id, "assistant", alert_option_response)
             self._persist_chat_state(chat_id, user_id, text, alert_option_response)
             return ChatResponse(alert_option_response, parse_mode=None)
+
+        alert_response = self._maybe_handle_alert_natural_language(chat_id, text)
+        if alert_response is not None:
+            self._persist_turn(chat_id, user_id, "assistant", alert_response)
+            self._persist_chat_state(chat_id, user_id, text, alert_response)
+            return ChatResponse(alert_response, parse_mode=None)
 
         report_response = self._maybe_handle_report_natural_language(chat_id, text)
         if report_response is not None:

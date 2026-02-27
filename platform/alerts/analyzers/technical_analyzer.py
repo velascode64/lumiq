@@ -1,13 +1,12 @@
 """
 Technical Analysis Calculator.
 
-Calculates RSI, ATR, Chandelier Exit, and other technical indicators.
+Calculates technical indicators using the `ta` library.
 """
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
-import numpy as np
 import pandas as pd
 
 from ..models.schemas import TechnicalIndicators, StockData
@@ -15,8 +14,75 @@ from ..models.schemas import TechnicalIndicators, StockData
 logger = logging.getLogger(__name__)
 
 
+def _ta_modules() -> Dict[str, Any]:
+    try:
+        from ta.momentum import (
+            RSIIndicator,
+            StochasticOscillator,
+            WilliamsRIndicator,
+            ROCIndicator,
+            TSIIndicator,
+            UltimateOscillator,
+        )
+        from ta.trend import (
+            MACD,
+            SMAIndicator,
+            EMAIndicator,
+            ADXIndicator,
+            CCIIndicator,
+            AroonIndicator,
+        )
+        from ta.volatility import (
+            AverageTrueRange,
+            BollingerBands,
+            DonchianChannel,
+            KeltnerChannel,
+        )
+        from ta.volume import (
+            OnBalanceVolumeIndicator,
+            ChaikinMoneyFlowIndicator,
+            MFIIndicator,
+        )
+    except Exception as exc:  # pragma: no cover - dependency installed at runtime
+        raise RuntimeError(
+            "The `ta` library is required for technical analysis. "
+            "Install project dependencies from `lumiq/requirements.txt`."
+        ) from exc
+
+    return {
+        "RSIIndicator": RSIIndicator,
+        "StochasticOscillator": StochasticOscillator,
+        "WilliamsRIndicator": WilliamsRIndicator,
+        "ROCIndicator": ROCIndicator,
+        "TSIIndicator": TSIIndicator,
+        "UltimateOscillator": UltimateOscillator,
+        "MACD": MACD,
+        "SMAIndicator": SMAIndicator,
+        "EMAIndicator": EMAIndicator,
+        "ADXIndicator": ADXIndicator,
+        "CCIIndicator": CCIIndicator,
+        "AroonIndicator": AroonIndicator,
+        "AverageTrueRange": AverageTrueRange,
+        "BollingerBands": BollingerBands,
+        "DonchianChannel": DonchianChannel,
+        "KeltnerChannel": KeltnerChannel,
+        "OnBalanceVolumeIndicator": OnBalanceVolumeIndicator,
+        "ChaikinMoneyFlowIndicator": ChaikinMoneyFlowIndicator,
+        "MFIIndicator": MFIIndicator,
+    }
+
+
+def _last_valid(series: pd.Series) -> Optional[float]:
+    if series is None:
+        return None
+    clean = pd.to_numeric(series, errors="coerce").dropna()
+    if clean.empty:
+        return None
+    return float(clean.iloc[-1])
+
+
 class TechnicalAnalyzer:
-    """Calculates technical indicators for stocks."""
+    """Calculates technical indicators for stocks using `ta`."""
 
     def __init__(
         self,
@@ -93,34 +159,13 @@ class TechnicalAnalyzer:
             Current RSI value (0-100)
         """
         period = period or self.rsi_period
-
         if len(prices) < period + 1:
-            return 50.0  # Neutral if insufficient data
+            return 50.0
 
-        # Calculate price changes
-        delta = prices.diff()
-
-        # Separate gains and losses
-        gains = delta.where(delta > 0, 0.0)
-        losses = (-delta).where(delta < 0, 0.0)
-
-        # Calculate exponential moving averages
-        avg_gain = gains.ewm(alpha=1/period, adjust=False).mean()
-        avg_loss = losses.ewm(alpha=1/period, adjust=False).mean()
-
-        last_gain = float(avg_gain.iloc[-1])
-        last_loss = float(avg_loss.iloc[-1])
-
-        # Avoid division by zero and handle flat series
-        if last_loss == 0:
-            return 50.0 if last_gain == 0 else 100.0
-        if last_gain == 0:
-            return 0.0
-
-        rs = last_gain / last_loss
-        rsi = 100 - (100 / (1 + rs))
-
-        return float(rsi)
+        mods = _ta_modules()
+        indicator = mods["RSIIndicator"](close=prices.astype(float), window=int(period))
+        value = _last_valid(indicator.rsi())
+        return 50.0 if value is None else float(value)
 
     def calculate_atr(
         self,
@@ -144,27 +189,18 @@ class TechnicalAnalyzer:
             Current ATR value
         """
         period = period or self.atr_period
-
         if len(df) < period + 1:
             return 0.0
 
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-
-        # Calculate True Range components
-        high_low = high - low
-        high_close = (high - close.shift()).abs()
-        low_close = (low - close.shift()).abs()
-
-        # True Range is the max of the three
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = ranges.max(axis=1)
-
-        # ATR is the exponential moving average of True Range
-        atr = true_range.ewm(alpha=1/period, adjust=False).mean()
-
-        return float(atr.iloc[-1])
+        mods = _ta_modules()
+        indicator = mods["AverageTrueRange"](
+            high=df["high"].astype(float),
+            low=df["low"].astype(float),
+            close=df["close"].astype(float),
+            window=int(period),
+        )
+        value = _last_valid(indicator.average_true_range())
+        return 0.0 if value is None else float(value)
 
     def calculate_chandelier_exit(
         self,
@@ -217,8 +253,20 @@ class TechnicalAnalyzer:
         """
         if len(prices) < period:
             return None
+        mods = _ta_modules()
+        indicator = mods["SMAIndicator"](close=prices.astype(float), window=int(period))
+        return _last_valid(indicator.sma_indicator())
 
-        return float(prices.iloc[-period:].mean())
+    def calculate_ema(
+        self,
+        prices: pd.Series,
+        period: int,
+    ) -> Optional[float]:
+        if len(prices) < period:
+            return None
+        mods = _ta_modules()
+        indicator = mods["EMAIndicator"](close=prices.astype(float), window=int(period))
+        return _last_valid(indicator.ema_indicator())
 
     def calculate_bollinger_bands(
         self,
@@ -239,13 +287,17 @@ class TechnicalAnalyzer:
         """
         if len(prices) < period:
             return None, None, None
-
-        window = prices.iloc[-period:]
-        middle = float(window.mean())
-        std = float(window.std(ddof=0))
-        upper = middle + (stddev * std)
-        lower = middle - (stddev * std)
-        return lower, middle, upper
+        mods = _ta_modules()
+        indicator = mods["BollingerBands"](
+            close=prices.astype(float),
+            window=int(period),
+            window_dev=float(stddev),
+        )
+        return (
+            _last_valid(indicator.bollinger_lband()),
+            _last_valid(indicator.bollinger_mavg()),
+            _last_valid(indicator.bollinger_hband()),
+        )
 
     def calculate_macd(
         self,
@@ -269,11 +321,242 @@ class TechnicalAnalyzer:
         if len(prices) < slow + signal:
             return None, None
 
-        ema_fast = prices.ewm(span=fast, adjust=False).mean()
-        ema_slow = prices.ewm(span=slow, adjust=False).mean()
-        macd = ema_fast - ema_slow
-        signal_line = macd.ewm(span=signal, adjust=False).mean()
-        return macd, signal_line
+        mods = _ta_modules()
+        indicator = mods["MACD"](
+            close=prices.astype(float),
+            window_fast=int(fast),
+            window_slow=int(slow),
+            window_sign=int(signal),
+        )
+        return indicator.macd(), indicator.macd_signal()
+
+    def calculate_indicator_series(
+        self,
+        df: pd.DataFrame,
+        indicator: str,
+        **params: Any,
+    ) -> pd.Series:
+        mods = _ta_modules()
+        name = (indicator or "").strip().lower()
+        close = df["close"].astype(float)
+        high = df["high"].astype(float) if "high" in df.columns else close
+        low = df["low"].astype(float) if "low" in df.columns else close
+        volume = df["volume"].astype(float) if "volume" in df.columns else pd.Series([0.0] * len(df), index=df.index)
+
+        if name == "rsi":
+            return mods["RSIIndicator"](close=close, window=int(params.get("window", 14))).rsi()
+        if name == "stoch_k":
+            return mods["StochasticOscillator"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 14)),
+                smooth_window=int(params.get("smooth_window", 3)),
+            ).stoch()
+        if name == "stoch_d":
+            return mods["StochasticOscillator"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 14)),
+                smooth_window=int(params.get("smooth_window", 3)),
+            ).stoch_signal()
+        if name == "williams_r":
+            return mods["WilliamsRIndicator"](high=high, low=low, close=close, lbp=int(params.get("window", 14))).williams_r()
+        if name == "roc":
+            return mods["ROCIndicator"](close=close, window=int(params.get("window", 12))).roc()
+        if name == "tsi":
+            return mods["TSIIndicator"](
+                close=close,
+                window_slow=int(params.get("window_slow", 25)),
+                window_fast=int(params.get("window_fast", 13)),
+            ).tsi()
+        if name == "ultimate_oscillator":
+            return mods["UltimateOscillator"](
+                high=high,
+                low=low,
+                close=close,
+                window1=int(params.get("window1", 7)),
+                window2=int(params.get("window2", 14)),
+                window3=int(params.get("window3", 28)),
+            ).ultimate_oscillator()
+        if name == "macd":
+            return mods["MACD"](
+                close=close,
+                window_fast=int(params.get("window_fast", 12)),
+                window_slow=int(params.get("window_slow", 26)),
+                window_sign=int(params.get("window_sign", 9)),
+            ).macd()
+        if name == "macd_signal":
+            return mods["MACD"](
+                close=close,
+                window_fast=int(params.get("window_fast", 12)),
+                window_slow=int(params.get("window_slow", 26)),
+                window_sign=int(params.get("window_sign", 9)),
+            ).macd_signal()
+        if name == "macd_diff":
+            return mods["MACD"](
+                close=close,
+                window_fast=int(params.get("window_fast", 12)),
+                window_slow=int(params.get("window_slow", 26)),
+                window_sign=int(params.get("window_sign", 9)),
+            ).macd_diff()
+        if name == "sma":
+            return mods["SMAIndicator"](close=close, window=int(params.get("window", 20))).sma_indicator()
+        if name == "ema":
+            return mods["EMAIndicator"](close=close, window=int(params.get("window", 20))).ema_indicator()
+        if name == "atr":
+            return mods["AverageTrueRange"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 14)),
+            ).average_true_range()
+        if name == "adx":
+            return mods["ADXIndicator"](high=high, low=low, close=close, window=int(params.get("window", 14))).adx()
+        if name == "adx_pos":
+            return mods["ADXIndicator"](high=high, low=low, close=close, window=int(params.get("window", 14))).adx_pos()
+        if name == "adx_neg":
+            return mods["ADXIndicator"](high=high, low=low, close=close, window=int(params.get("window", 14))).adx_neg()
+        if name == "cci":
+            return mods["CCIIndicator"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 20)),
+                constant=float(params.get("constant", 0.015)),
+            ).cci()
+        if name == "aroon_up":
+            return mods["AroonIndicator"](close=close, window=int(params.get("window", 25))).aroon_up()
+        if name == "aroon_down":
+            return mods["AroonIndicator"](close=close, window=int(params.get("window", 25))).aroon_down()
+        if name == "bollinger_upper":
+            return mods["BollingerBands"](
+                close=close,
+                window=int(params.get("window", 20)),
+                window_dev=float(params.get("window_dev", 2.0)),
+            ).bollinger_hband()
+        if name == "bollinger_lower":
+            return mods["BollingerBands"](
+                close=close,
+                window=int(params.get("window", 20)),
+                window_dev=float(params.get("window_dev", 2.0)),
+            ).bollinger_lband()
+        if name == "bollinger_mid":
+            return mods["BollingerBands"](
+                close=close,
+                window=int(params.get("window", 20)),
+                window_dev=float(params.get("window_dev", 2.0)),
+            ).bollinger_mavg()
+        if name == "bollinger_width":
+            return mods["BollingerBands"](
+                close=close,
+                window=int(params.get("window", 20)),
+                window_dev=float(params.get("window_dev", 2.0)),
+            ).bollinger_wband()
+        if name == "bollinger_percent":
+            return mods["BollingerBands"](
+                close=close,
+                window=int(params.get("window", 20)),
+                window_dev=float(params.get("window_dev", 2.0)),
+            ).bollinger_pband()
+        if name == "donchian_upper":
+            return mods["DonchianChannel"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 20)),
+                offset=int(params.get("offset", 0)),
+            ).donchian_channel_hband()
+        if name == "donchian_lower":
+            return mods["DonchianChannel"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 20)),
+                offset=int(params.get("offset", 0)),
+            ).donchian_channel_lband()
+        if name == "donchian_mid":
+            return mods["DonchianChannel"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 20)),
+                offset=int(params.get("offset", 0)),
+            ).donchian_channel_mband()
+        if name == "keltner_upper":
+            return mods["KeltnerChannel"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 20)),
+                window_atr=int(params.get("window_atr", 10)),
+                multiplier=float(params.get("multiplier", 2.0)),
+            ).keltner_channel_hband()
+        if name == "keltner_lower":
+            return mods["KeltnerChannel"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 20)),
+                window_atr=int(params.get("window_atr", 10)),
+                multiplier=float(params.get("multiplier", 2.0)),
+            ).keltner_channel_lband()
+        if name == "keltner_mid":
+            return mods["KeltnerChannel"](
+                high=high,
+                low=low,
+                close=close,
+                window=int(params.get("window", 20)),
+                window_atr=int(params.get("window_atr", 10)),
+                multiplier=float(params.get("multiplier", 2.0)),
+            ).keltner_channel_mband()
+        if name == "obv":
+            return mods["OnBalanceVolumeIndicator"](close=close, volume=volume).on_balance_volume()
+        if name == "cmf":
+            return mods["ChaikinMoneyFlowIndicator"](
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+                window=int(params.get("window", 20)),
+            ).chaikin_money_flow()
+        if name == "mfi":
+            return mods["MFIIndicator"](
+                high=high,
+                low=low,
+                close=close,
+                volume=volume,
+                window=int(params.get("window", 14)),
+            ).money_flow_index()
+        raise ValueError(f"Unsupported indicator: {indicator}")
+
+    def calculate_indicator_snapshot(
+        self,
+        df: pd.DataFrame,
+        indicator: str,
+        **params: Any,
+    ) -> Dict[str, Any]:
+        series = self.calculate_indicator_series(df, indicator, **params)
+        clean = pd.to_numeric(series, errors="coerce").dropna()
+        if clean.empty:
+            return {
+                "indicator": (indicator or "").strip().lower(),
+                "value": None,
+                "previous": None,
+                "delta": None,
+                "bars_with_values": 0,
+            }
+        current = float(clean.iloc[-1])
+        previous = float(clean.iloc[-2]) if len(clean) >= 2 else None
+        delta = (current - previous) if previous is not None else None
+        return {
+            "indicator": (indicator or "").strip().lower(),
+            "value": current,
+            "previous": previous,
+            "delta": delta,
+            "bars_with_values": int(len(clean)),
+        }
 
     def is_oversold(self, rsi: float) -> bool:
         """Check if RSI indicates oversold condition."""

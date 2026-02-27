@@ -7,12 +7,14 @@ python-telegram-bot in some Python versions.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import logging
 import time
 import re
 import shlex
 import shutil
+import threading
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -438,6 +440,29 @@ class TradingTelegramBot:
                     self._api_post("sendMessage", payload)
                 else:
                     raise
+
+    def _send_chat_action(self, chat_id: int, action: str = "typing") -> None:
+        try:
+            self._api_post("sendChatAction", {"chat_id": chat_id, "action": action})
+        except Exception:
+            logger.debug("Failed to send chat action", exc_info=True)
+
+    @contextmanager
+    def _typing_indicator(self, chat_id: int):
+        stop_event = threading.Event()
+
+        def _worker() -> None:
+            while not stop_event.is_set():
+                self._send_chat_action(chat_id, action="typing")
+                stop_event.wait(4.0)
+
+        thread = threading.Thread(target=_worker, name=f"telegram-typing-{chat_id}", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop_event.set()
+            thread.join(timeout=1.0)
 
     def _help_text(self) -> str:
         mode_text = "Conversational Agno mode: ON" if self.agent else "Conversational Agno mode: OFF"
@@ -1082,16 +1107,17 @@ class TradingTelegramBot:
             return
 
         try:
-            if text.startswith("/"):
-                tokens = text.split()
-                raw_command = tokens[0][1:]
-                command = raw_command.split("@", 1)[0].lower()
-                args = tokens[1:]
-                response = self._handle_command(chat_id, user_id, command, args)
-                parse_mode = "HTML"
-            else:
-                response = self._handle_chat(chat_id, user_id, text)
-                parse_mode = None
+            with self._typing_indicator(int(chat_id)):
+                if text.startswith("/"):
+                    tokens = text.split()
+                    raw_command = tokens[0][1:]
+                    command = raw_command.split("@", 1)[0].lower()
+                    args = tokens[1:]
+                    response = self._handle_command(chat_id, user_id, command, args)
+                    parse_mode = "HTML"
+                else:
+                    response = self._handle_chat(chat_id, user_id, text)
+                    parse_mode = None
             self._send_message(chat_id, response, parse_mode=parse_mode)
         except Exception as exc:
             logger.exception("Error handling update: %s", exc)
