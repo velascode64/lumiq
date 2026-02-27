@@ -5,25 +5,42 @@ services:
     build:
       context: .
       dockerfile: docker/core.Dockerfile
-    container_name: lumiq-core-api
-    env_file:
-      - .env
+    environment:
+      ALPACA_API_KEY: ${ALPACA_API_KEY}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET}
+      ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY:-}
+      ALPACA_IS_PAPER: ${ALPACA_IS_PAPER:-true}
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGNO_PROVIDER: ${AGNO_PROVIDER:-openai}
+      AGNO_MODEL: ${AGNO_MODEL:-gpt-4o-mini}
+      LUMIQ_DATABASE_URL: ${LUMIQ_DATABASE_URL:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     ports:
-      - "8000:8000"
+      - "${LUMIQ_CORE_API_PORT:-8000}:8000"
     volumes:
       - ./platform/alerts/data:/app/platform/alerts/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5); sys.exit(0)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     command: ["python", "run_api.py", "--host", "0.0.0.0", "--port", "8000"]
 
   telegram-bot:
     build:
       context: .
       dockerfile: docker/telegram-bot.Dockerfile
-    container_name: lumiq-telegram-bot
-    env_file:
-      - .env
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      LUMIQ_CORE_API_URL: ${LUMIQ_CORE_API_URL:-http://api:8000}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     restart: unless-stopped
-    command: ["python", "telegram_bot/run_bot.py", "--api-base-url", "http://api:8000"]
-
+    command: ["python", "telegram_bot/run_bot.py"]
