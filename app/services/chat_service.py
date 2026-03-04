@@ -703,6 +703,12 @@ class ChatService:
                 if candidate not in {"con", "las", "los", "siguientes", "stocks", "acciones", "tickers"}:
                     group_name = candidate
 
+        # If deterministic parsing cannot extract the destination group with high
+        # confidence, do not mutate watchlists here. Let the team/LLM handle the
+        # request instead of silently falling back to "favorites".
+        if is_create_group and not group_name:
+            return None
+
         symbols = self._extract_symbols(text)
         noise = {
             "CREA", "CREAR", "GRUPO", "FAVORITO", "FAVORITOS", "STOCK", "STOCKS", "ACCION", "ACCIONES",
@@ -721,8 +727,6 @@ class ChatService:
             return None
 
         if is_create_group:
-            if not group_name:
-                group_name = "favorites"
             added = []
             for s in symbols:
                 try:
