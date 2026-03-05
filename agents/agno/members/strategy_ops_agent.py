@@ -16,6 +16,10 @@ from agno.agent import Agent
 from agno.models.anthropic import Claude
 from agno.models.openai import OpenAIChat
 from agno.tools import tool
+
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
+
 from lumibot.brokers import Alpaca
 
 try:
@@ -193,7 +197,8 @@ def build_trading_tools(orchestrator: StrategyOrchestrator, allow_strategy_contr
         try:
             broker_cfg = dict(orchestrator.broker_config)
             broker_cfg.setdefault("IS_PAPER", True)
-            broker = Alpaca(broker_cfg)
+            # Status inspection is REST-only; avoid opening trading stream here.
+            broker = Alpaca(broker_cfg, connect_stream=False)
 
             account = broker.api.get_account()
             positions = broker.api.get_all_positions()

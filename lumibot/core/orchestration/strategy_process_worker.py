@@ -10,11 +10,15 @@ import importlib.util
 import inspect
 import json
 import logging
+import os
 import signal
 import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
 
 from lumibot.brokers import Alpaca
 from lumibot.strategies import Strategy
@@ -136,4 +140,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

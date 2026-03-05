@@ -6,11 +6,16 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from agno.agent import Agent
 from agno.tools import tool
+
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
+
 from lumibot.brokers import Alpaca
 
 try:
@@ -42,7 +47,8 @@ class LiveBrokerGateway:
         cfg.setdefault("IS_PAPER", True)
         cfg["IS_PAPER"] = str(mode).strip().lower() != "live"
         cfg["PAPER"] = cfg["IS_PAPER"]
-        return Alpaca(cfg)
+        # Tooling gateway is request/response REST; no persistent trading stream needed.
+        return Alpaca(cfg, connect_stream=False)
 
     @staticmethod
     def _is_crypto(symbol: str) -> bool:

@@ -11,9 +11,13 @@ Provides:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
 
 from lumibot.brokers import Alpaca
 
@@ -355,7 +359,8 @@ def get_pnl_report(broker_config: Dict[str, Any]) -> PnLReport:
     Returns:
         PnLReport dataclass with all P&L data
     """
-    broker = Alpaca(broker_config)
+    # PnL summary only needs REST calls; keep stream disconnected to prevent 429 storms.
+    broker = Alpaca(broker_config, connect_stream=False)
     api = broker.api
     report = PnLReport()
     report.timestamp = datetime.now(timezone.utc).isoformat()

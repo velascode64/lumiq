@@ -26,6 +26,9 @@ try:
 except Exception:  # pragma: no cover
     pd = None
 
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
+
 from lumibot.brokers import Alpaca
 
 try:
@@ -343,7 +346,8 @@ class PortfolioReviewService:
     def _alpaca_api(self):
         broker_cfg = dict(self.broker_config)
         broker_cfg.setdefault("IS_PAPER", True)
-        broker = Alpaca(broker_cfg)
+        # REST-only path: avoid opening trading websocket streams from helper services.
+        broker = Alpaca(broker_cfg, connect_stream=False)
         return broker.api
 
     def _fetch_positions(self) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:

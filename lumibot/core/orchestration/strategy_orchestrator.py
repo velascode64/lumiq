@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
+
 from lumibot.strategies import Strategy
 
 try:
@@ -404,4 +407,3 @@ class StrategyOrchestrator:
         with self._lock:
             running_names = list(self._active.keys())
         return {name: self.get_strategy_status(name) for name in running_names}
-
