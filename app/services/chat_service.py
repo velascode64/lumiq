@@ -386,7 +386,7 @@ class ChatService:
             "/list alerts\n"
             "/alerts [list|create-drop|create-rise|create-target|create-rsi-overbought|create-rsi-oversold|pause|resume|remove] ...\n"
             "/examples [technicals|alerts|trading]\n"
-            "/report <pre_open|midday|close|weekly>\n"
+            "/report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]\n"
             "/news [watchlist|group <name>]\n"
             "/trade_mode [paper|live]\n"
             "/live_trading_options\n"
@@ -967,18 +967,68 @@ class ChatService:
 
         if command == "report":
             if not args:
-                return ChatResponse("Uso: /report <pre_open|midday|close|weekly>", parse_mode=None)
+                return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
             scheduler = getattr(self.runtime, "portfolio_review_scheduler", None)
             if scheduler is None:
                 return ChatResponse("Portfolio review scheduler no disponible.", parse_mode=None)
             kind = args[0].lower()
+            valid_kinds = {"pre_open", "midday", "close", "weekly"}
+            if kind not in valid_kinds:
+                return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
+            group_name: Optional[str] = None
+            symbol: Optional[str] = None
+            if len(args) >= 2:
+                second = args[1].lower()
+                if second in {"group", "watchlist"}:
+                    if len(args) < 3:
+                        return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
+                    group_name = args[2].strip().lower()
+                elif second == "ticker":
+                    if len(args) < 3:
+                        return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
+                    symbol = args[2].strip().upper()
+                else:
+                    candidate = args[1].strip()
+                    candidate_group = candidate.lower()
+                    store = getattr(self.runtime, "watchlist_store", None)
+                    cfg = None
+                    if store is not None and hasattr(store, "load"):
+                        try:
+                            cfg = store.load()
+                        except Exception:
+                            cfg = None
+                    if cfg is not None and candidate_group in (cfg.groups or {}):
+                        group_name = candidate_group
+                    else:
+                        symbol = candidate.upper()
             try:
-                started = scheduler.trigger_async(kind, chat_id=chat_id, source="manual")
+                if group_name:
+                    started = scheduler.trigger_async_with_group(
+                        kind,
+                        chat_id=chat_id,
+                        source="manual",
+                        group_name=group_name,
+                    )
+                elif symbol:
+                    started = scheduler.trigger_async_with_symbols(
+                        kind,
+                        symbols=[symbol],
+                        chat_id=chat_id,
+                        source="manual",
+                    )
+                else:
+                    started = scheduler.trigger_async(kind, chat_id=chat_id, source="manual")
             except Exception as exc:
                 return ChatResponse(f"Error iniciando reporte: {exc}", parse_mode=None)
             if started:
-                return ChatResponse(f"Generando reporte {kind}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
-            return ChatResponse(f"Ya hay un reporte {kind} en ejecución para este chat.", parse_mode=None)
+                scope = f" del grupo {group_name}" if group_name else ""
+                if not scope and symbol:
+                    scope = f" de ticker {symbol}"
+                return ChatResponse(f"Generando reporte {kind}{scope}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
+            scope = f" del grupo {group_name}" if group_name else ""
+            if not scope and symbol:
+                scope = f" de ticker {symbol}"
+            return ChatResponse(f"Ya hay un reporte {kind}{scope} en ejecución para este chat.", parse_mode=None)
 
         if command == "news":
             scheduler = getattr(self.runtime, "news_scheduler", None)

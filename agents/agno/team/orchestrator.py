@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Optional
 
 from agno.team import Team
@@ -42,6 +43,20 @@ def _collect_member_names(response_obj) -> list[str]:
         if nested:
             names.extend(nested)
     return names
+
+
+def _iter_member_responses(response_obj):
+    member_responses = getattr(response_obj, "member_responses", None) or []
+    for member in member_responses:
+        yield member
+        yield from _iter_member_responses(member)
+
+
+def _short(value: object, max_len: int = 400) -> str:
+    text = "" if value is None else str(value)
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
 
 
 def _resolve_model():
@@ -209,6 +224,7 @@ def create_alerts_trading_team(
 def run_team_message(team: Team, message: str, user_id: str, session_id: str) -> str:
     """Run one message through the Team and return plain text output."""
     try:
+        start = time.monotonic()
         logger.info(
             "Agno Team input | team=%s | session_id=%s | user_id=%s | message=%s",
             getattr(team, "name", None) or team.__class__.__name__,
@@ -223,6 +239,23 @@ def run_team_message(team: Team, message: str, user_id: str, session_id: str) ->
             getattr(team, "name", None) or team.__class__.__name__,
             session_id,
             routed_members or ["unknown"],
+        )
+        for member in _iter_member_responses(response):
+            member_name = getattr(member, "agent_name", None) or getattr(member, "team_name", None) or "unknown"
+            member_content = _short(getattr(member, "content", None))
+            logger.info(
+                "Agno Team member output | team=%s | session_id=%s | member=%s | content=%s",
+                getattr(team, "name", None) or team.__class__.__name__,
+                session_id,
+                member_name,
+                member_content,
+            )
+        elapsed = time.monotonic() - start
+        logger.info(
+            "Agno Team completed | team=%s | session_id=%s | elapsed=%.2fs",
+            getattr(team, "name", None) or team.__class__.__name__,
+            session_id,
+            elapsed,
         )
         content = getattr(response, "content", None)
         if content is None:
