@@ -24,17 +24,7 @@ It combines:
 
 - a trading execution layer built around **Lumibot** and **Alpaca**
 - a product layer for chat, reporting, and orchestration
-- multi-agent experiments using **Agno**
-- supporting experiments with other agent runtimes and research frameworks
-
-The main product direction today is:
-
-- `lumiq`: the application layer
-- `lumibot-dev`: the trading engine and strategy workspace
-
-Other folders exist as experiments, references, or parallel explorations.
-
-## Main Components
+- multi-agent team using **Agno**
 
 ### `lumiq`
 
