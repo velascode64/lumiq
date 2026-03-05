@@ -56,29 +56,6 @@ Key responsibilities inside `lumiq`:
 - expose APIs for strategy control
 - keep a central runtime for long-lived services
 
-### `lumibot-dev`
-
-This is the trading foundation.
-
-It includes:
-
-- the Lumibot codebase
-- strategy runners
-- example live scripts
-- tests and docs
-
-This is where the actual trading and backtesting mechanics live.
-
-### `automaton`, `eliza-trader`, `trading-agents`, `openclaw`
-
-These folders represent different explorations:
-
-- autonomous agent runtimes
-- ElizaOS-based agents and MCP setups
-- multi-agent financial research frameworks
-- future OpenClaw integration direction
-
-They are useful because the long-term goal is not just “run one bot.” The goal is to make the system easier for agent runtimes to extend and improve.
 
 ## What You Can Do Today
 
@@ -202,12 +179,6 @@ There are also helper scripts such as:
 - `lumiq/run_local_telegram.sh`
 - `lumiq/run_local_stack.sh`
 
-You will generally need environment variables for:
-
-- Alpaca credentials
-- Telegram bot credentials
-- whichever model provider you use for the agents
-
 ## Running Backtests
 
 The backtesting engine lives in `lumibot-dev`.
@@ -223,10 +194,7 @@ This repo also includes strategy runner scripts and custom strategy files for mo
 
 Common places to look:
 
-- `lumibot-dev/strategy_runner.py`
-- `lumibot-dev/run_eth_momentum.py`
-- `lumibot-dev/run_crypto_live.py`
-- `lumiq/scripts/`
+- `python lumibot/strategies/backtesting/eth_post_drop_oscillation_backtest.py `
 
 If you want to extend strategy development, the intended direction is:
 
