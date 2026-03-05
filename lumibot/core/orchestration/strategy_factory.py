@@ -8,8 +8,12 @@ based on Lumibot framework integration.
 import importlib
 import importlib.util
 import inspect
+import os
 from typing import Dict, Any, Type, Optional
 from pathlib import Path
+
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
 
 from lumibot.strategies import Strategy
 

@@ -13,6 +13,10 @@ import pytz
 import logging
 import re
 import json
+import os
+
+# Prevent lumibot.credentials from auto-spawning a hidden broker/stream on import.
+os.environ.setdefault("TRADING_BROKER", "none")
 
 from lumibot.brokers import Alpaca
 from lumibot.backtesting import AlpacaBacktesting
