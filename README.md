@@ -1,4 +1,4 @@
-# AI Trading Companion Monorepo
+# Lumiq AI Trading Companion
 
 This repository has been a long time coming.
 
