@@ -30,6 +30,8 @@ It combines:
 
 This is the clearest application layer in the repo.
 
+[![Support via Ko-fi](https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/carlosvelasco)
+
 It provides:
 
 - a **FastAPI core server**
