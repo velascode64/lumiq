@@ -12,6 +12,10 @@ Even though everything right now is moving around agent platforms like OpenClaw,
 
 Ideally, OpenClaw or any other agent runtime could use this repository as a real backend. An agent could take this library, start testing strategies, create new teams, improve portfolio monitoring, and help users discover opportunities with better context and better benchmarks. That may be the right path for agents to create strategies that are actually measurable, useful, and understandable for non-technical traders.
 
+<a href="https://ko-fi.com/carlosvelasco" target="_blank">
+  <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi" height="80">
+</a>
+
 That is the main idea here:
 
 **an AI companion for trading.**
@@ -29,8 +33,6 @@ It combines:
 ### `lumiq`
 
 This is the clearest application layer in the repo.
-
-[![Support via Ko-fi](https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/carlosvelasco)
 
 It provides:
 
