@@ -195,12 +195,12 @@ class CoreRuntime:
             def _news_analyze_callback(group_name: Optional[str]) -> str:
                 if self.news_agent is None:
                     return self.news_monitor_service.generate_preopen_digest_text(group_name=group_name)
-                scope = f" del grupo {group_name}" if group_name else " de mi watchlist"
+                scope = f" for watchlist group {group_name}" if group_name else " for my watchlist"
                 msg = (
-                    "Genera el digest de noticias pre-apertura para Telegram.\n"
-                    "Usa tools reales para leer noticias y clasificalas por relevancia.\n"
-                    f"Analiza noticias{scope} de las ultimas 18 horas.\n"
-                    "Formato: Resumen, Alta prioridad, Impacto en posiciones, Impacto en watchlist sin posicion, Ruido, Tickers a revisar primero, Sugerencias."
+                    "Generate the pre-open news digest for Telegram.\n"
+                    "Use real tools to read news and classify relevance.\n"
+                    f"Analyze news{scope} from the last 18 hours.\n"
+                    "Format: Summary, High Priority, Impact on Positions, Impact on Watchlist Without Position, Noise, Tickers to Review First, Suggestions."
                 )
                 return run_news_agent_message(self.news_agent, msg, user_id="cron-news", session_id=f"news-preopen-{group_name or 'all'}")
             def _persist_news_digest(text: str, source: str, group_name: Optional[str], chat_id: Optional[int]) -> None:

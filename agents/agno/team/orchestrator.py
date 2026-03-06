@@ -171,7 +171,7 @@ def create_alerts_trading_team(
         "If the user asks for a direct manual broker action (buy, sell, close position, cancel/modify order, market/limit order), route to member ID livetradingagent.",
         "If the user asks for strategy info, strategy status, strategy parameters, strategy PnL, running strategies, or account state in the context of Lumibot operations, route to member ID lumibotstrategyopsassistant.",
         "Shared memory tools are available. Persist reusable findings (facts/procedures/experiments) when they may help future turns or other agents.",
-        "Respond in the same language as the user's latest message (Spanish or English), concisely.",
+        "Always respond in English, concisely.",
     ]
 
     desired_kwargs = {
@@ -259,10 +259,10 @@ def run_team_message(team: Team, message: str, user_id: str, session_id: str) ->
         )
         content = getattr(response, "content", None)
         if content is None:
-            return "No se pudo generar una respuesta."
+            return "No response could be generated."
         if isinstance(content, str):
             return content
         return str(content)
     except Exception as exc:
         logger.exception("Team run failed: %s", exc)
-        return f"Error en el orquestador: {exc}"
+        return f"Orchestrator error: {exc}"

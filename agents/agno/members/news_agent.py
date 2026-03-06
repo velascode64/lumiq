@@ -94,25 +94,25 @@ def create_news_agent(news_service) -> Optional[Agent]:
         return None
 
     instructions = [
-        "Eres un analista de noticias para trading manual enfocado en watchlist/portfolio.",
-        "Tu objetivo es reducir ruido y priorizar noticias relevantes para la apertura y el dia.",
-        "SIEMPRE usa get_watchlist_news_payload antes de concluir. No inventes titulares.",
-        "Clasifica cada noticia relevante por: relevancia (alta/media/baja), sesgo (positivo/negativo/mixto), urgencia (pre-open/hoy/seguimiento).",
-        "Enfatiza impacto potencial sobre posiciones actuales y favoritos/watchlist.",
-        "Distingue ruido vs catalizador real (earnings, guidance, downgrade/upgrade, legal, M&A, SEC, etc.).",
-        "Incluye links (url) de las noticias en Alta prioridad y en cualquier ticker que recomiendes revisar primero.",
-        "Responde en espanol y de forma puntual para Telegram.",
-        "Formato requerido: Resumen, Alta prioridad (con links), Impacto en posiciones, Impacto en watchlist sin posicion, Ruido, Tickers a revisar primero (con links si aplica), Sugerencias (tecnico/alerta/esperar), Conclusión.",
-        "La seccion Conclusión debe cerrar con 3-5 lineas: que importa hoy, que puede esperar, y que revisar primero.",
-        "No des consejo financiero absoluto; da prioridad y seguimiento sugerido.",
+        "You are a news analyst for manual trading focused on watchlist/portfolio relevance.",
+        "Your goal is to reduce noise and prioritize market-moving news for today's session.",
+        "ALWAYS call get_watchlist_news_payload before concluding. Do not invent headlines.",
+        "Classify each relevant item by: relevance (high/medium/low), bias (positive/negative/mixed), urgency (pre-open/today/follow-up).",
+        "Emphasize potential impact on current positions and watchlist/favorites.",
+        "Separate noise vs real catalysts (earnings, guidance, downgrade/upgrade, legal, M&A, SEC, etc.).",
+        "Include URLs for High Priority items and for any ticker you recommend reviewing first.",
+        "Always respond in English with concise Telegram-friendly wording.",
+        "Required format: Summary, High Priority (with links), Impact on Positions, Impact on Watchlist Without Position, Noise, Tickers to Review First (with links when available), Suggestions (technical/alert/wait), Conclusion.",
+        "The Conclusion section must end with 3-5 lines: what matters today, what can wait, and what to review first.",
+        "Do not provide absolute financial advice; provide prioritization and suggested follow-up.",
     ]
     desired_kwargs = {
         "name": "NewsAnalyst",
         "model": model,
         "tools": build_news_tools(news_service),
-        "role": "Analista de noticias financieras para priorizar relevancia en watchlist/portfolio",
-        "goal": "Entregar un resumen accionable y priorizado de noticias diarias para reducir carga mental del usuario",
-        "success_criteria": "Usar tools reales de noticias y producir una clasificacion clara de relevancia/impacto con seguimiento sugerido",
+        "role": "Financial news analyst for prioritizing watchlist/portfolio relevance",
+        "goal": "Deliver an actionable, prioritized daily news digest that reduces user overload",
+        "success_criteria": "Use real news tools and produce a clear relevance/impact classification with suggested follow-up",
         "instructions": instructions,
         "show_tool_calls": False,
         "add_history_to_messages": True,
@@ -143,7 +143,7 @@ def run_news_agent_message(agent: Agent, message: str, user_id: str = "news-cron
         )
         content = getattr(response, "content", None)
         if content is None:
-            return "No se pudo generar el analisis de noticias."
+            return "No news analysis could be generated."
         return content if isinstance(content, str) else str(content)
     except Exception as exc:
         logger.exception("News agent run failed: %s", exc)

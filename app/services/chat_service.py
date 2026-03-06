@@ -155,6 +155,14 @@ class ChatService:
             f"User request: {text}"
         )
 
+    @staticmethod
+    def _enforce_english_policy(text: str) -> str:
+        return (
+            "Language policy: Always reply in English.\n"
+            "Keep the response concise and actionable.\n"
+            f"User request: {text}"
+        )
+
     def _infer_domain(self, text: str) -> Optional[str]:
         lower = (text or "").lower()
         if any(k in lower for k in {"rsi", "macd", "bollinger", "soporte", "resistencia", "overbought", "oversold", "technicals"}):
@@ -1315,7 +1323,7 @@ class ChatService:
                 return ChatResponse(_format_pnl_summary(summary), parse_mode=None)
             except Exception as exc:
                 logger.exception("PNL command failed: %s", exc)
-                return ChatResponse(f"No se pudo calcular el PnL: {exc}")
+                return ChatResponse(f"Could not compute PnL: {exc}")
 
         return ChatResponse("Unknown command. Use /help")
 
@@ -1369,7 +1377,7 @@ class ChatService:
             session_id = f"telegram-{chat_id}"
             response = run_live_trading_message(
                 live_trading_agent,
-                text,
+                self._enforce_english_policy(text),
                 user_id=str(user_id),
                 session_id=session_id,
                 trade_execution_mode=self._get_trade_mode(chat_id),
@@ -1382,7 +1390,9 @@ class ChatService:
             session_id = f"telegram-{chat_id}"
             response = run_team_message(
                 self.runtime.team,
-                self._context_prefix(chat_id, self._apply_trade_mode_policy(chat_id, text)),
+                self._enforce_english_policy(
+                    self._context_prefix(chat_id, self._apply_trade_mode_policy(chat_id, text))
+                ),
                 user_id=str(user_id),
                 session_id=session_id,
             )
@@ -1394,7 +1404,7 @@ class ChatService:
             session_id = f"telegram-{chat_id}"
             response = run_agent_message(
                 self.runtime.agent,
-                self._context_prefix(chat_id, text),
+                self._enforce_english_policy(self._context_prefix(chat_id, text)),
                 user_id=str(user_id),
                 session_id=session_id,
                 trade_execution_mode=self._get_trade_mode(chat_id),

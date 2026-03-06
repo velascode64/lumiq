@@ -109,7 +109,7 @@ class ApiTelegramBot:
                 except FutureTimeoutError:
                     self._send_message(
                         chat_id=chat_id,
-                        text="Procesando tu solicitud... te envio la respuesta en breve.",
+                        text="Processing your request... I will send the final answer shortly.",
                     )
                     logger.info("Async chat task slow-path | chat_id=%s | threshold=%.2fs", chat_id, self.fast_path_seconds)
                     reply = core_future.result()
@@ -122,8 +122,8 @@ class ApiTelegramBot:
             self._send_message(
                 chat_id=chat_id,
                 text=(
-                    "No pude completar tu solicitud a tiempo. "
-                    "Intenta de nuevo con una consulta mas corta o en unos segundos."
+                    "I could not complete your request in time. "
+                    "Please try again with a shorter query or retry in a few seconds."
                 ),
             )
 
