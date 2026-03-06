@@ -17,12 +17,14 @@ from typing import Any, Dict, List, Optional
 try:
     from ...agents.agno.members.trading_agent_compat import run_agent_message
     from ...agents.agno.members.live_trading_agent import run_live_trading_message
+    from ...agents.agno.single_agent import run_single_agent_message
     from ...agents.agno.team.orchestrator import run_team_message
     from ...platform.pnl.alpaca_pnl import get_pnl_report
     from ...platform.alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
 except ImportError:
     from agents.agno.members.trading_agent_compat import run_agent_message
     from agents.agno.members.live_trading_agent import run_live_trading_message
+    from agents.agno.single_agent import run_single_agent_message
     from agents.agno.team.orchestrator import run_team_message
     from platform.pnl.alpaca_pnl import get_pnl_report
     from platform.alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
@@ -378,7 +380,11 @@ class ChatService:
         return header + "\n\n".join(sections)
 
     def help_text(self) -> str:
-        mode_text = "Conversational Agno mode: ON" if (self.runtime.team or self.runtime.agent) else "Conversational Agno mode: OFF"
+        mode_text = (
+            "Conversational Agno mode: ON"
+            if (getattr(self.runtime, "single_agent", None) or self.runtime.team or self.runtime.agent)
+            else "Conversational Agno mode: OFF"
+        )
         return (
             "Lumiq trading bot is ready.\n\n"
             f"{mode_text}\n\n"
@@ -1371,6 +1377,21 @@ class ChatService:
                 self._persist_turn(chat_id, user_id, "assistant", clarification)
                 self._persist_chat_state(chat_id, user_id, text, clarification)
                 return ChatResponse(clarification, parse_mode=None)
+
+        single_agent = getattr(self.runtime, "single_agent", None)
+        if single_agent is not None:
+            session_id = f"telegram-{chat_id}"
+            response = run_single_agent_message(
+                single_agent,
+                self._enforce_english_policy(
+                    self._context_prefix(chat_id, self._apply_trade_mode_policy(chat_id, text))
+                ),
+                user_id=str(user_id),
+                session_id=session_id,
+            )
+            self._persist_turn(chat_id, user_id, "assistant", response)
+            self._persist_chat_state(chat_id, user_id, text, response)
+            return ChatResponse(response, parse_mode=None)
 
         live_trading_agent = getattr(self.runtime, "live_trading_agent", None)
         if live_trading_agent is not None and self._is_trade_intent_text(text):

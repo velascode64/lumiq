@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 from typing import Optional
 
 import numpy as np
@@ -336,6 +337,26 @@ class ETHAggressiveMomentumYTDStrategy(Strategy):
         self.log_message(f"Strategy closing. Entries executed: {self.total_entries}")
 
 
+def _build_alpaca_backtest_config() -> dict:
+    oauth_token = os.getenv("ALPACA_OAUTH_TOKEN")
+    test_api_key = os.getenv("ALPACA_TEST_API_KEY")
+    test_api_secret = os.getenv("ALPACA_TEST_API_SECRET")
+    api_key = os.getenv("ALPACA_API_KEY")
+    api_secret = os.getenv("ALPACA_API_SECRET")
+
+    if oauth_token:
+        return {"OAUTH_TOKEN": oauth_token, "PAPER": True}
+    if test_api_key and test_api_secret:
+        return {"API_KEY": test_api_key, "API_SECRET": test_api_secret, "PAPER": True}
+    if api_key and api_secret:
+        return {"API_KEY": api_key, "API_SECRET": api_secret, "PAPER": True}
+
+    raise RuntimeError(
+        "No usable Alpaca config found. Set ALPACA_TEST_API_KEY/SECRET, "
+        "ALPACA_API_KEY/ALPACA_API_SECRET, or ALPACA_OAUTH_TOKEN in .env"
+    )
+
+
 def run_backtest(source: str = "alpaca", start: Optional[dt.datetime] = None, end: Optional[dt.datetime] = None):
     load_dotenv()
     tzinfo = pytz.timezone("UTC")
@@ -349,10 +370,7 @@ def run_backtest(source: str = "alpaca", start: Optional[dt.datetime] = None, en
 
     if source == "alpaca":
         from lumibot.backtesting import AlpacaBacktesting
-        from lumibot.credentials import ALPACA_TEST_CONFIG
-
-        if not ALPACA_TEST_CONFIG:
-            raise RuntimeError("ALPACA_TEST_CONFIG not found. Configure Alpaca paper keys in .env")
+        alpaca_backtest_config = _build_alpaca_backtest_config()
 
         results, strategy = ETHAggressiveMomentumYTDStrategy.run_backtest(
             datasource_class=AlpacaBacktesting,
@@ -371,7 +389,7 @@ def run_backtest(source: str = "alpaca", start: Optional[dt.datetime] = None, en
             },
             timestep="minute",
             market="24/7",
-            config=ALPACA_TEST_CONFIG,
+            config=alpaca_backtest_config,
             refresh_cache=False,
             warm_up_trading_days=0,
             auto_adjust=False,

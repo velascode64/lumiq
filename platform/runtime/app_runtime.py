@@ -18,6 +18,7 @@ try:
     from ...lumibot.core.orchestration.strategy_orchestrator import StrategyOrchestrator
     from ...agents.agno.members.trading_agent_compat import create_trading_agent
     from ...agents.agno.members.live_trading_agent import create_live_trading_agent
+    from ...agents.agno.single_agent import create_single_trading_agent
     from ...agents.agno.team.orchestrator import create_alerts_trading_team
     from ..alerts.alert_system import AlertSystem
     from ..alerts.streaming import AlertStreamManager
@@ -37,6 +38,7 @@ except ImportError:
     from lumibot.core.orchestration.strategy_orchestrator import StrategyOrchestrator
     from agents.agno.members.trading_agent_compat import create_trading_agent
     from agents.agno.members.live_trading_agent import create_live_trading_agent
+    from agents.agno.single_agent import create_single_trading_agent
     from agents.agno.team.orchestrator import create_alerts_trading_team
     from platform.alerts.alert_system import AlertSystem
     from platform.alerts.streaming import AlertStreamManager
@@ -226,6 +228,14 @@ class CoreRuntime:
             logger.warning("WatchlistNewsMonitor disabled: %s", exc)
         self.live_trading_agent = create_live_trading_agent(self.orchestrator.broker_config)
         self.agent = create_trading_agent(self.orchestrator)
+        self.single_agent = create_single_trading_agent(
+            orchestrator=self.orchestrator,
+            alert_system=self.alert_system,
+            news_service=self.news_monitor_service,
+            memory_repo=self.memory_repo,
+            coordination_repo=self.coordination_repo,
+            agno_db=self.agno_team_db,
+        )
         self.team = create_alerts_trading_team(
             self.orchestrator,
             self.alert_system,

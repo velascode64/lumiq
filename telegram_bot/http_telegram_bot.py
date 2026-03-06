@@ -6,7 +6,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
-import os
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -23,9 +22,10 @@ class ApiTelegramBot:
         self.telegram_token = telegram_token
         self.base_url = f"https://api.telegram.org/bot{telegram_token}"
         self.core_api_base_url = core_api_base_url.rstrip("/")
-        self.core_timeout_seconds = float(os.getenv("LUMIQ_CORE_REQUEST_TIMEOUT_SECONDS", "300"))
-        self.fast_path_seconds = float(os.getenv("LUMIQ_TELEGRAM_FAST_PATH_SECONDS", "10"))
-        self.async_workers = max(int(os.getenv("LUMIQ_TELEGRAM_ASYNC_WORKERS", "4")), 1)
+        # Hard-coded high limits to avoid premature "Processing..." fallback.
+        self.core_timeout_seconds = 900.0
+        self.fast_path_seconds = 900.0
+        self.async_workers = 8
         self._executor = ThreadPoolExecutor(max_workers=self.async_workers, thread_name_prefix="telegram-core")
         self._core_executor = ThreadPoolExecutor(max_workers=self.async_workers, thread_name_prefix="telegram-core-call")
         self._inflight_lock = threading.Lock()
