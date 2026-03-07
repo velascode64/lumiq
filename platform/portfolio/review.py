@@ -590,6 +590,7 @@ class PortfolioReviewService:
         report_kind: str,
         include_benchmark: bool = True,
         group_name: Optional[str] = None,
+        symbols: Optional[Sequence[str]] = None,
     ) -> str:
         kind = (report_kind or "").strip().lower()
         if kind not in {"pre_open", "midday", "close", "weekly"}:
@@ -603,6 +604,7 @@ class PortfolioReviewService:
         universe: List[str] = base["universe"]
         normalized_group_name: Optional[str] = None
         group_filtered_symbols: Optional[Set[str]] = None
+        normalized_symbols: List[str] = []
         if group_name:
             normalized_group_name = str(group_name).strip().lower()
             group_tickers = cfg.groups.get(normalized_group_name)
@@ -612,6 +614,17 @@ class PortfolioReviewService:
             group_filtered_symbols = set(group_tickers)
             # Strict group filter: only tickers from requested group.
             universe = [s for s in universe if s in group_filtered_symbols]
+            include_benchmark = False
+        elif symbols:
+            normalized_symbols = [_normalize_symbol(s) for s in symbols if _normalize_symbol(s)]
+            if not normalized_symbols:
+                raise ValueError("Debes enviar al menos un ticker válido.")
+            symbol_filter = set(normalized_symbols)
+            # Strict ticker filter for ad-hoc ticker report.
+            universe = [s for s in universe if s in symbol_filter]
+            for sym in normalized_symbols:
+                if sym not in universe:
+                    universe.append(sym)
             include_benchmark = False
         recent_sells = self._fetch_recent_sells(days=30)
         snaps = self._collect_snapshots(universe)
@@ -658,6 +671,8 @@ class PortfolioReviewService:
         }
         if normalized_group_name:
             lines.append(f"{title_map[kind]} - grupo {normalized_group_name} ({ny_now.strftime('%Y-%m-%d %H:%M %Z')})")
+        elif normalized_symbols:
+            lines.append(f"{title_map[kind]} - ticker {', '.join(normalized_symbols)} ({ny_now.strftime('%Y-%m-%d %H:%M %Z')})")
         else:
             lines.append(f"{title_map[kind]} ({ny_now.strftime('%Y-%m-%d %H:%M %Z')})")
         lines.append("")
@@ -672,6 +687,8 @@ class PortfolioReviewService:
             lines.append(f"- Posiciones abiertas: {len(positions)} | Universe monitoreado: {len(universe)} tickers")
         if normalized_group_name:
             lines.append(f"- Filtro de grupo activo: {normalized_group_name} ({len(cfg.groups.get(normalized_group_name, []))} tickers)")
+        elif normalized_symbols:
+            lines.append(f"- Filtro de ticker activo: {', '.join(normalized_symbols)}")
         if portfolio_snaps:
             port_day_moves = [s.day_change_pct for s in portfolio_snaps if s.day_change_pct is not None]
             if port_day_moves:
@@ -852,7 +869,7 @@ class PortfolioReviewScheduler:
                 time.sleep(10)
 
     def trigger_async(self, report_kind: str, chat_id: Optional[int] = None, source: str = "manual") -> bool:
-        return self.trigger_async_with_group(report_kind, chat_id=chat_id, source=source, group_name=None)
+        return self.trigger_async_with_group(report_kind, chat_id=chat_id, source=source, group_name=None, symbols=None)
 
     def trigger_async_with_group(
         self,
@@ -860,6 +877,7 @@ class PortfolioReviewScheduler:
         chat_id: Optional[int] = None,
         source: str = "manual",
         group_name: Optional[str] = None,
+        symbols: Optional[Sequence[str]] = None,
     ) -> bool:
         kind = (report_kind or "").strip().lower()
         if kind in {"daily", "day"}:
@@ -867,17 +885,46 @@ class PortfolioReviewScheduler:
         if kind not in {"pre_open", "midday", "close", "weekly"}:
             raise ValueError("Invalid report kind")
         gk = (group_name or "").strip().lower() or "all"
-        job_key = f"{kind}:{gk}:{chat_id or 'broadcast'}"
+        sk = ",".join(sorted({_normalize_symbol(s) for s in (symbols or []) if _normalize_symbol(s)})) or "-"
+        job_key = f"{kind}:{gk}:{sk}:{chat_id or 'broadcast'}"
         with self._lock:
             if job_key in self._running_jobs:
                 return False
             self._running_jobs.add(job_key)
-        self._executor.submit(self._run_job, job_key, kind, chat_id, source, (group_name or None))
+        self._executor.submit(self._run_job, job_key, kind, chat_id, source, (group_name or None), list(symbols or []))
         return True
 
-    def _run_job(self, job_key: str, report_kind: str, chat_id: Optional[int], source: str, group_name: Optional[str] = None) -> None:
+    def trigger_async_with_symbols(
+        self,
+        report_kind: str,
+        symbols: Sequence[str],
+        chat_id: Optional[int] = None,
+        source: str = "manual",
+    ) -> bool:
+        return self.trigger_async_with_group(
+            report_kind,
+            chat_id=chat_id,
+            source=source,
+            group_name=None,
+            symbols=symbols,
+        )
+
+    def _run_job(
+        self,
+        job_key: str,
+        report_kind: str,
+        chat_id: Optional[int],
+        source: str,
+        group_name: Optional[str] = None,
+        symbols: Optional[Sequence[str]] = None,
+    ) -> None:
         try:
-            text = self.review_service.generate_report_text(report_kind, include_benchmark=True, group_name=group_name)
+            text = self.review_service.generate_report_text(
+                report_kind,
+                include_benchmark=True,
+                group_name=group_name,
+                symbols=symbols,
+            )
             prefix = f"[{source}] " if source else ""
             final_text = prefix + text
             if self.persist_callback is not None:
@@ -901,10 +948,12 @@ class PortfolioReviewScheduler:
                 except Exception as exc:
                     logger.exception("Failed to send portfolio report to chat_id=%s: %s", cid, exc)
         except Exception as exc:
-            logger.exception("Portfolio report job failed (%s, group=%s): %s", report_kind, group_name, exc)
+            logger.exception("Portfolio report job failed (%s, group=%s, symbols=%s): %s", report_kind, group_name, symbols, exc)
             if chat_id is not None:
                 try:
                     extra = f" del grupo {group_name}" if group_name else ""
+                    if not extra and symbols:
+                        extra = f" de ticker {', '.join([_normalize_symbol(s) for s in symbols if _normalize_symbol(s)])}"
                     self.send_callback(int(chat_id), f"No se pudo generar el reporte {report_kind}{extra}: {exc}")
                 except Exception:
                     pass
