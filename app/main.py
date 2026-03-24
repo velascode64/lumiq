@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -49,6 +50,16 @@ class UpdateStrategyParamsRequest(BaseModel):
     params: Dict[str, Any]
 
 
+class ResearchRequest(BaseModel):
+    ticker: str
+    start_date: str
+    end_date: str
+
+
+class ResearchReply(BaseModel):
+    result: Dict[str, Any]
+
+
 def create_app(strategies_path: Optional[str] = None) -> FastAPI:
     runtime = CoreRuntime(strategies_path=strategies_path)
     chat = ChatService(runtime)
@@ -74,6 +85,8 @@ def create_app(strategies_path: Optional[str] = None) -> FastAPI:
             "strategies_running": runtime.orchestrator.list_running_strategies(),
             "alerts_enabled": runtime.alert_system is not None,
             "team_enabled": runtime.team is not None,
+            "research_enabled": runtime.research_workflow is not None,
+            "research_error": getattr(runtime, "research_workflow_error", None),
         }
 
     @app.post("/chat/message", response_model=ChatReply)
@@ -144,5 +157,24 @@ def create_app(strategies_path: Optional[str] = None) -> FastAPI:
         if runtime.alert_system is None:
             raise HTTPException(status_code=503, detail="Alert system not available")
         return {"messages": runtime.alert_system.evaluate_rules()}
+
+    @app.post("/api/research", response_model=ResearchReply)
+    def run_research(req: ResearchRequest) -> ResearchReply:
+        if runtime.research_workflow is None:
+            detail = getattr(runtime, "research_workflow_error", None) or "Research workflow not available"
+            raise HTTPException(status_code=503, detail=detail)
+        try:
+            start_dt = datetime.strptime(req.start_date, "%Y-%m-%d").date()
+            end_dt = datetime.strptime(req.end_date, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {exc}") from exc
+        if end_dt < start_dt:
+            raise HTTPException(status_code=400, detail="end_date must be >= start_date")
+        result = runtime.research_workflow.run(
+            ticker=req.ticker.strip(),
+            start_date=start_dt.strftime("%Y-%m-%d"),
+            end_date=end_dt.strftime("%Y-%m-%d"),
+        )
+        return ResearchReply(result=result)
 
     return app

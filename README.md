@@ -172,6 +172,7 @@ There are also helper scripts such as:
 - `lumiq/run_local_core.sh`
 - `lumiq/run_local_telegram.sh`
 - `lumiq/run_local_stack.sh`
+- `LUMIQ_CORE_API_PORT=8010 LUMIQ_CORE_API_URL=http://127.0.0.1:8010 ./run_local_stack.sh`
 
 ## Running Backtests
 

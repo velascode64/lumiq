@@ -19,6 +19,7 @@ try:
     from ...agents.agno.members.trading_agent_compat import create_trading_agent
     from ...agents.agno.members.live_trading_agent import create_live_trading_agent
     from ...agents.agno.team.orchestrator import create_alerts_trading_team
+    from ...agents.agno.research import TradingAgentsAgnoWorkflow
     from ..alerts.alert_system import AlertSystem
     from ..alerts.streaming import AlertStreamManager
     from ..portfolio.review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
@@ -38,6 +39,7 @@ except ImportError:
     from agents.agno.members.trading_agent_compat import create_trading_agent
     from agents.agno.members.live_trading_agent import create_live_trading_agent
     from agents.agno.team.orchestrator import create_alerts_trading_team
+    from agents.agno.research import TradingAgentsAgnoWorkflow
     from platform.alerts.alert_system import AlertSystem
     from platform.alerts.streaming import AlertStreamManager
     from platform.portfolio.review import PortfolioReviewScheduler, PortfolioReviewService, WatchlistStore
@@ -143,6 +145,8 @@ class CoreRuntime:
         self.news_monitor_service: Optional[WatchlistNewsMonitorService] = None
         self.news_scheduler: Optional[WatchlistNewsScheduler] = None
         self.news_agent = None
+        self.research_workflow = None
+        self.research_workflow_error: Optional[str] = None
 
         try:
             self.alert_system = AlertSystem(
@@ -224,6 +228,14 @@ class CoreRuntime:
             )
         except Exception as exc:
             logger.warning("WatchlistNewsMonitor disabled: %s", exc)
+
+        try:
+            self.research_workflow = TradingAgentsAgnoWorkflow()
+            self.research_workflow_error = None
+        except Exception as exc:
+            self.research_workflow_error = str(exc)
+            logger.warning("Research workflow disabled: %s", exc)
+
         self.live_trading_agent = create_live_trading_agent(self.orchestrator.broker_config)
         self.agent = create_trading_agent(self.orchestrator)
         self.team = create_alerts_trading_team(
