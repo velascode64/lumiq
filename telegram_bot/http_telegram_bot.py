@@ -57,10 +57,13 @@ class ApiTelegramBot:
                 payload["parse_mode"] = parse_mode
             try:
                 self._telegram_post("sendMessage", payload)
+                logger.info("Telegram sendMessage ok | chat_id=%s | chars=%s", chat_id, len(chunk))
             except Exception:
+                logger.exception("Telegram sendMessage failed | chat_id=%s | parse_mode=%s", chat_id, parse_mode)
                 if "parse_mode" in payload:
                     payload.pop("parse_mode", None)
                     self._telegram_post("sendMessage", payload)
+                    logger.info("Telegram sendMessage ok after retry without parse_mode | chat_id=%s | chars=%s", chat_id, len(chunk))
                 else:
                     raise
 
@@ -112,6 +115,32 @@ class ApiTelegramBot:
             )
         }
 
+    def _stream_research(self, chat_id: int, ticker: str, start_date: str, end_date: str) -> Dict[str, Any]:
+        if self._research_workflow is None:
+            self._ensure_repo_imports()
+            try:
+                from lumiq.agents.agno.research import TradingAgentsAgnoWorkflow
+            except ImportError:
+                from agents.agno.research import TradingAgentsAgnoWorkflow
+            self._research_workflow = TradingAgentsAgnoWorkflow()
+
+        def _on_event(stage: str, title: str, content: str) -> None:
+            logger.info("Research event | stage=%s | title=%s\n%s", stage, title, content or "(sin contenido)")
+            body = (content or "").strip() or "(sin contenido)"
+            self._send_message(chat_id=chat_id, text=f"{title}\n\n{body}")
+
+        self._send_message(
+            chat_id=chat_id,
+            text=f"Research started: {ticker}\nRango: {start_date} -> {end_date}\nVoy a enviarte cada etapa de la deliberacion.",
+        )
+        result = self._research_workflow.run(
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            on_event=_on_event,
+        )
+        return {"result": result}
+
     @staticmethod
     def _research_usage() -> str:
         return "Uso: /research <ticker> <start_date> <end_date>\nEjemplo: /research NVDA 2026-03-01 2026-03-23"
@@ -120,35 +149,15 @@ class ApiTelegramBot:
     def _format_research_result(payload: Dict[str, Any]) -> str:
         result = payload.get("result") or {}
         if not isinstance(result, dict):
-            return "Research API devolvio una respuesta invalida."
+            return "Research finalizado, pero la respuesta final no tuvo formato valido."
 
-        def _clip(value: Any, limit: int = 1200) -> str:
-            text = str(value or "").strip()
-            if len(text) <= limit:
-                return text
-            return text[: limit - 3].rstrip() + "..."
-
-        parts = [
-            f"Research: {result.get('company_of_interest', '-')}",
-            f"Rango: {result.get('start_date', '-')} -> {result.get('end_date', '-')}",
-        ]
-        final_decision = _clip(result.get("final_trade_decision"), limit=1500)
-        investment_plan = _clip(result.get("investment_plan"), limit=1500)
-        trader_plan = _clip(result.get("trader_investment_plan"), limit=1500)
-
-        if final_decision:
-            parts.append("")
-            parts.append("Decision final:")
-            parts.append(final_decision)
-        if investment_plan:
-            parts.append("")
-            parts.append("Investment plan:")
-            parts.append(investment_plan)
-        if trader_plan:
-            parts.append("")
-            parts.append("Trader plan:")
-            parts.append(trader_plan)
-        return "\n".join(parts)
+        final_decision = str(result.get("final_trade_decision") or "").strip()
+        first_line = final_decision.splitlines()[0].strip() if final_decision else "sin decision final"
+        return (
+            f"Research complete: {result.get('company_of_interest', '-')}\n"
+            f"Rango: {result.get('start_date', '-')} -> {result.get('end_date', '-')}\n"
+            f"Decision: {first_line}"
+        )
 
     def _handle_command(self, chat_id: int, user_id: int, text: str) -> bool:
         parts = text.split()
@@ -163,8 +172,9 @@ class ApiTelegramBot:
 
         _, ticker, start_date, end_date = parts
         try:
+            logger.info("Telegram /research command received | chat_id=%s | ticker=%s | start=%s | end=%s", chat_id, ticker, start_date, end_date)
             with self._typing_indicator(chat_id):
-                payload = self._forward_to_research(ticker=ticker.upper(), start_date=start_date, end_date=end_date)
+                payload = self._stream_research(chat_id=chat_id, ticker=ticker.upper(), start_date=start_date, end_date=end_date)
             self._send_message(chat_id=chat_id, text=self._format_research_result(payload))
         except requests.HTTPError as exc:
             detail = ""

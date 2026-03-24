@@ -12,8 +12,14 @@ def test_research_command_calls_research_api(monkeypatch):
     monkeypatch.setattr(bot, "_typing_indicator", lambda _chat_id: nullcontext())
     monkeypatch.setattr(
         bot,
-        "_forward_to_research",
-        lambda ticker, start_date, end_date: {
+        "_stream_research",
+        lambda chat_id, ticker, start_date, end_date: sent_messages.extend(
+            [
+                f"Market report\n\nmarket for {ticker}",
+                f"Bull deliberation\n\nbull for {ticker}",
+            ]
+        )
+        or {
             "result": {
                 "company_of_interest": ticker,
                 "start_date": start_date,
@@ -37,9 +43,11 @@ def test_research_command_calls_research_api(monkeypatch):
         }
     )
 
-    assert sent_messages
-    assert "Research: NVDA" in sent_messages[0]
-    assert "Decision final:" in sent_messages[0]
+    assert len(sent_messages) == 3
+    assert "Market report" in sent_messages[0]
+    assert "Bull deliberation" in sent_messages[1]
+    assert "Research complete: NVDA" in sent_messages[2]
+    assert "Decision: BUY" in sent_messages[2]
 
 
 def test_research_command_returns_usage_when_arguments_are_missing(monkeypatch):
