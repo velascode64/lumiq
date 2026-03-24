@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import lumiq.app.services.chat_service as chat_service_module
 from lumiq.app.services.chat_service import ChatService
 from lumiq.platform.db.core import DatabaseManager
 from lumiq.platform.db.repositories import DbChatContextRepository
@@ -58,7 +59,13 @@ class _RuntimeStub:
         self.orchestrator = None
         self.live_trading_agent = None
         self.team = _TeamMustNotRun()
+        self.single_agent = None
         self.agent = None
+
+
+class _WatchlistStoreStub:
+    def summary_text(self):
+        return "Watchlist groups:\n- oil: 3 (XLE, APA, USO)"
 
 
 def _build_chat_repo(tmp_path):
@@ -127,3 +134,41 @@ def test_technical_context_prefix_does_not_carry_stale_symbol_without_current_sy
     )
     prefix = service._context_prefix(8101362735, "revisa RSI y soporte de hoy")
     assert "active_symbol:" not in prefix
+
+
+@pytest.mark.integration
+def test_generic_message_does_not_include_persisted_context(tmp_path):
+    chat_repo = _build_chat_repo(tmp_path)
+    service = ChatService(_RuntimeStub(chat_repo))
+
+    service._persist_chat_state(
+        chat_id=8101362735,
+        user_id=8101362735,
+        text="analiza NVDA con RSI en grupo oil",
+    )
+    prefix = service._context_prefix(8101362735, "hey")
+    assert prefix == "hey"
+
+
+@pytest.mark.integration
+def test_watchlist_natural_language_uses_single_agent_when_available(tmp_path, monkeypatch):
+    chat_repo = _build_chat_repo(tmp_path)
+    runtime = _RuntimeStub(chat_repo)
+    runtime.watchlist_store = _WatchlistStoreStub()
+    runtime.single_agent = object()
+    service = ChatService(runtime)
+
+    def _fake_run_single_agent_message(agent, message, user_id, session_id):
+        assert agent is runtime.single_agent
+        assert message.endswith("give me my watchlist")
+        return "Tool-based watchlist response"
+
+    monkeypatch.setattr(chat_service_module, "run_single_agent_message", _fake_run_single_agent_message)
+
+    response = service.handle_chat(
+        chat_id=8101362735,
+        user_id=8101362735,
+        text="give me my watchlist",
+    )
+
+    assert response.text == "Tool-based watchlist response"

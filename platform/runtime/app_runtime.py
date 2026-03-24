@@ -232,6 +232,7 @@ class CoreRuntime:
             orchestrator=self.orchestrator,
             alert_system=self.alert_system,
             news_service=self.news_monitor_service,
+            watchlist_store=self.watchlist_store,
             memory_repo=self.memory_repo,
             coordination_repo=self.coordination_repo,
             agno_db=self.agno_team_db,

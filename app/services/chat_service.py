@@ -226,6 +226,8 @@ class ChatService:
         if not state:
             return text
         requested_domain = self._infer_domain(text)
+        if requested_domain is None:
+            return text
         symbol_from_state = state.get("active_symbol")
         if requested_domain == "technicals":
             # Strict technical context policy:
@@ -1335,12 +1337,14 @@ class ChatService:
 
     def handle_chat(self, chat_id: int, user_id: int, text: str) -> ChatResponse:
         self._persist_turn(chat_id, user_id, "user", text)
+        single_agent = getattr(self.runtime, "single_agent", None)
 
-        watchlist_response = self._maybe_handle_watchlist_natural_language(text)
-        if watchlist_response is not None:
-            self._persist_turn(chat_id, user_id, "assistant", watchlist_response)
-            self._persist_chat_state(chat_id, user_id, text, watchlist_response)
-            return ChatResponse(watchlist_response, parse_mode=None)
+        if single_agent is None:
+            watchlist_response = self._maybe_handle_watchlist_natural_language(text)
+            if watchlist_response is not None:
+                self._persist_turn(chat_id, user_id, "assistant", watchlist_response)
+                self._persist_chat_state(chat_id, user_id, text, watchlist_response)
+                return ChatResponse(watchlist_response, parse_mode=None)
 
         alert_option_response = self._maybe_handle_alert_option_reply(chat_id, text)
         if alert_option_response is not None:
@@ -1348,11 +1352,12 @@ class ChatService:
             self._persist_chat_state(chat_id, user_id, text, alert_option_response)
             return ChatResponse(alert_option_response, parse_mode=None)
 
-        alert_response = self._maybe_handle_alert_natural_language(chat_id, text)
-        if alert_response is not None:
-            self._persist_turn(chat_id, user_id, "assistant", alert_response)
-            self._persist_chat_state(chat_id, user_id, text, alert_response)
-            return ChatResponse(alert_response, parse_mode=None)
+        if single_agent is None:
+            alert_response = self._maybe_handle_alert_natural_language(chat_id, text)
+            if alert_response is not None:
+                self._persist_turn(chat_id, user_id, "assistant", alert_response)
+                self._persist_chat_state(chat_id, user_id, text, alert_response)
+                return ChatResponse(alert_response, parse_mode=None)
 
         report_response = self._maybe_handle_report_natural_language(chat_id, text)
         if report_response is not None:
@@ -1378,8 +1383,9 @@ class ChatService:
                 self._persist_chat_state(chat_id, user_id, text, clarification)
                 return ChatResponse(clarification, parse_mode=None)
 
-        single_agent = getattr(self.runtime, "single_agent", None)
         if single_agent is not None:
+            if self.runtime.alert_system is not None:
+                self.runtime.alert_system.set_active_chat_id(chat_id)
             session_id = f"telegram-{chat_id}"
             response = run_single_agent_message(
                 single_agent,
