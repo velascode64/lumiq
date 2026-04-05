@@ -815,7 +815,7 @@ def create_technical_agent(alert_system) -> Optional[Agent]:
         "In 'Technical Recommendation', use actions such as: wait, observe, wait for confirmed breakout, wait for retest, avoid chasing price, consider an alert; avoid giving final trade orders.",
         "In 'Key Levels', include support/resistance if they can be inferred; otherwise state that explicitly.",
         "In 'Confidence', use low/medium/high and explain why in one sentence.",
-        "Respond in the same language as the user's latest message (Spanish or English), with a teacher-like tone and simple, concrete language.",
+        "Always respond in English, with a teacher-like tone and simple, concrete language.",
         "If the user asks for a quick conclusion, still include a technical recommendation plus 2-3 key numeric facts.",
     ]
 

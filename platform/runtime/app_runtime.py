@@ -18,6 +18,7 @@ try:
     from ...lumibot.core.orchestration.strategy_orchestrator import StrategyOrchestrator
     from ...agents.agno.members.trading_agent_compat import create_trading_agent
     from ...agents.agno.members.live_trading_agent import create_live_trading_agent
+    from ...agents.agno.single_agent import create_single_trading_agent
     from ...agents.agno.team.orchestrator import create_alerts_trading_team
     from ..alerts.alert_system import AlertSystem
     from ..alerts.streaming import AlertStreamManager
@@ -37,6 +38,7 @@ except ImportError:
     from lumibot.core.orchestration.strategy_orchestrator import StrategyOrchestrator
     from agents.agno.members.trading_agent_compat import create_trading_agent
     from agents.agno.members.live_trading_agent import create_live_trading_agent
+    from agents.agno.single_agent import create_single_trading_agent
     from agents.agno.team.orchestrator import create_alerts_trading_team
     from platform.alerts.alert_system import AlertSystem
     from platform.alerts.streaming import AlertStreamManager
@@ -195,12 +197,12 @@ class CoreRuntime:
             def _news_analyze_callback(group_name: Optional[str]) -> str:
                 if self.news_agent is None:
                     return self.news_monitor_service.generate_preopen_digest_text(group_name=group_name)
-                scope = f" del grupo {group_name}" if group_name else " de mi watchlist"
+                scope = f" for watchlist group {group_name}" if group_name else " for my watchlist"
                 msg = (
-                    "Genera el digest de noticias pre-apertura para Telegram.\n"
-                    "Usa tools reales para leer noticias y clasificalas por relevancia.\n"
-                    f"Analiza noticias{scope} de las ultimas 18 horas.\n"
-                    "Formato: Resumen, Alta prioridad, Impacto en posiciones, Impacto en watchlist sin posicion, Ruido, Tickers a revisar primero, Sugerencias."
+                    "Generate the pre-open news digest for Telegram.\n"
+                    "Use real tools to read news and classify relevance.\n"
+                    f"Analyze news{scope} from the last 18 hours.\n"
+                    "Format: Summary, High Priority, Impact on Positions, Impact on Watchlist Without Position, Noise, Tickers to Review First, Suggestions."
                 )
                 return run_news_agent_message(self.news_agent, msg, user_id="cron-news", session_id=f"news-preopen-{group_name or 'all'}")
             def _persist_news_digest(text: str, source: str, group_name: Optional[str], chat_id: Optional[int]) -> None:
@@ -226,6 +228,15 @@ class CoreRuntime:
             logger.warning("WatchlistNewsMonitor disabled: %s", exc)
         self.live_trading_agent = create_live_trading_agent(self.orchestrator.broker_config)
         self.agent = create_trading_agent(self.orchestrator)
+        self.single_agent = create_single_trading_agent(
+            orchestrator=self.orchestrator,
+            alert_system=self.alert_system,
+            news_service=self.news_monitor_service,
+            watchlist_store=self.watchlist_store,
+            memory_repo=self.memory_repo,
+            coordination_repo=self.coordination_repo,
+            agno_db=self.agno_team_db,
+        )
         self.team = create_alerts_trading_team(
             self.orchestrator,
             self.alert_system,

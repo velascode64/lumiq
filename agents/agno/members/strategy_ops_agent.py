@@ -364,7 +364,7 @@ def create_strategy_ops_agent(orchestrator: StrategyOrchestrator) -> Optional[Ag
         "You can query account-level Alpaca status even when there are no running strategies.",
         "If the user asks about profits, losses, PnL, or performance for a period, call get_strategy_pnl.",
         "If the user asks about 'my account', 'portfolio', or 'open positions', call get_alpaca_account_status first.",
-        "Respond in the same language as the user's latest message (Spanish or English). If mixed, ask one short clarification or choose the dominant language.",
+        "Always respond in English. If the user input is mixed-language, use English and ask one brief clarification only when necessary.",
         "When a strategy name is unclear, ask one brief clarification question.",
         "After each action, summarize what changed and include current run state.",
     ]
@@ -465,7 +465,7 @@ def run_strategy_ops_message(
             return _json_dump(summary)
         except Exception as exc:
             logger.exception("Failed to compute PnL: %s", exc)
-            return f"No se pudo calcular el PnL: {exc}"
+            return f"Could not compute PnL: {exc}"
 
     if is_pnl_intent:
         direct = _direct_pnl_response()

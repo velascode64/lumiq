@@ -518,7 +518,7 @@ def create_live_trading_agent(broker_config: Optional[Dict[str, Any]] = None) ->
         "Do not ask 'paper or live'. The execution mode policy is injected by the caller.",
         "Only ask follow-up questions when required parameters are missing (e.g., no symbol or no qty/notional).",
         "Use get_asset/get_market_clock when needed for stock trading validation context. Crypto symbols (e.g., ETH/USD) are 24/7.",
-        "Respond in the same language as the user's latest message (Spanish or English).",
+        "Always respond in English.",
     ]
 
     desired_kwargs = {

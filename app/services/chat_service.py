@@ -17,12 +17,14 @@ from typing import Any, Dict, List, Optional
 try:
     from ...agents.agno.members.trading_agent_compat import run_agent_message
     from ...agents.agno.members.live_trading_agent import run_live_trading_message
+    from ...agents.agno.single_agent import run_single_agent_message
     from ...agents.agno.team.orchestrator import run_team_message
     from ...platform.pnl.alpaca_pnl import get_pnl_report
     from ...platform.alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
 except ImportError:
     from agents.agno.members.trading_agent_compat import run_agent_message
     from agents.agno.members.live_trading_agent import run_live_trading_message
+    from agents.agno.single_agent import run_single_agent_message
     from agents.agno.team.orchestrator import run_team_message
     from platform.pnl.alpaca_pnl import get_pnl_report
     from platform.alerts.alert_factory import create_rsi_oversold, create_rsi_overbought
@@ -155,6 +157,14 @@ class ChatService:
             f"User request: {text}"
         )
 
+    @staticmethod
+    def _enforce_english_policy(text: str) -> str:
+        return (
+            "Language policy: Always reply in English.\n"
+            "Keep the response concise and actionable.\n"
+            f"User request: {text}"
+        )
+
     def _infer_domain(self, text: str) -> Optional[str]:
         lower = (text or "").lower()
         if any(k in lower for k in {"rsi", "macd", "bollinger", "soporte", "resistencia", "overbought", "oversold", "technicals"}):
@@ -216,6 +226,8 @@ class ChatService:
         if not state:
             return text
         requested_domain = self._infer_domain(text)
+        if requested_domain is None:
+            return text
         symbol_from_state = state.get("active_symbol")
         if requested_domain == "technicals":
             # Strict technical context policy:
@@ -370,7 +382,11 @@ class ChatService:
         return header + "\n\n".join(sections)
 
     def help_text(self) -> str:
-        mode_text = "Conversational Agno mode: ON" if (self.runtime.team or self.runtime.agent) else "Conversational Agno mode: OFF"
+        mode_text = (
+            "Conversational Agno mode: ON"
+            if (getattr(self.runtime, "single_agent", None) or self.runtime.team or self.runtime.agent)
+            else "Conversational Agno mode: OFF"
+        )
         return (
             "Lumiq trading bot is ready.\n\n"
             f"{mode_text}\n\n"
@@ -386,7 +402,7 @@ class ChatService:
             "/list alerts\n"
             "/alerts [list|create-drop|create-rise|create-target|create-rsi-overbought|create-rsi-oversold|pause|resume|remove] ...\n"
             "/examples [technicals|alerts|trading]\n"
-            "/report <pre_open|midday|close|weekly>\n"
+            "/report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]\n"
             "/news [watchlist|group <name>]\n"
             "/trade_mode [paper|live]\n"
             "/live_trading_options\n"
@@ -967,18 +983,68 @@ class ChatService:
 
         if command == "report":
             if not args:
-                return ChatResponse("Uso: /report <pre_open|midday|close|weekly>", parse_mode=None)
+                return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
             scheduler = getattr(self.runtime, "portfolio_review_scheduler", None)
             if scheduler is None:
                 return ChatResponse("Portfolio review scheduler no disponible.", parse_mode=None)
             kind = args[0].lower()
+            valid_kinds = {"pre_open", "midday", "close", "weekly"}
+            if kind not in valid_kinds:
+                return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
+            group_name: Optional[str] = None
+            symbol: Optional[str] = None
+            if len(args) >= 2:
+                second = args[1].lower()
+                if second in {"group", "watchlist"}:
+                    if len(args) < 3:
+                        return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
+                    group_name = args[2].strip().lower()
+                elif second == "ticker":
+                    if len(args) < 3:
+                        return ChatResponse("Uso: /report <pre_open|midday|close|weekly> [watchlist <grupo>|group <grupo>|ticker <simbolo>|<grupo|simbolo>]", parse_mode=None)
+                    symbol = args[2].strip().upper()
+                else:
+                    candidate = args[1].strip()
+                    candidate_group = candidate.lower()
+                    store = getattr(self.runtime, "watchlist_store", None)
+                    cfg = None
+                    if store is not None and hasattr(store, "load"):
+                        try:
+                            cfg = store.load()
+                        except Exception:
+                            cfg = None
+                    if cfg is not None and candidate_group in (cfg.groups or {}):
+                        group_name = candidate_group
+                    else:
+                        symbol = candidate.upper()
             try:
-                started = scheduler.trigger_async(kind, chat_id=chat_id, source="manual")
+                if group_name:
+                    started = scheduler.trigger_async_with_group(
+                        kind,
+                        chat_id=chat_id,
+                        source="manual",
+                        group_name=group_name,
+                    )
+                elif symbol:
+                    started = scheduler.trigger_async_with_symbols(
+                        kind,
+                        symbols=[symbol],
+                        chat_id=chat_id,
+                        source="manual",
+                    )
+                else:
+                    started = scheduler.trigger_async(kind, chat_id=chat_id, source="manual")
             except Exception as exc:
                 return ChatResponse(f"Error iniciando reporte: {exc}", parse_mode=None)
             if started:
-                return ChatResponse(f"Generando reporte {kind}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
-            return ChatResponse(f"Ya hay un reporte {kind} en ejecución para este chat.", parse_mode=None)
+                scope = f" del grupo {group_name}" if group_name else ""
+                if not scope and symbol:
+                    scope = f" de ticker {symbol}"
+                return ChatResponse(f"Generando reporte {kind}{scope}... te lo envío por Telegram cuando esté listo.", parse_mode=None)
+            scope = f" del grupo {group_name}" if group_name else ""
+            if not scope and symbol:
+                scope = f" de ticker {symbol}"
+            return ChatResponse(f"Ya hay un reporte {kind}{scope} en ejecución para este chat.", parse_mode=None)
 
         if command == "news":
             scheduler = getattr(self.runtime, "news_scheduler", None)
@@ -1265,18 +1331,20 @@ class ChatService:
                 return ChatResponse(_format_pnl_summary(summary), parse_mode=None)
             except Exception as exc:
                 logger.exception("PNL command failed: %s", exc)
-                return ChatResponse(f"No se pudo calcular el PnL: {exc}")
+                return ChatResponse(f"Could not compute PnL: {exc}")
 
         return ChatResponse("Unknown command. Use /help")
 
     def handle_chat(self, chat_id: int, user_id: int, text: str) -> ChatResponse:
         self._persist_turn(chat_id, user_id, "user", text)
+        single_agent = getattr(self.runtime, "single_agent", None)
 
-        watchlist_response = self._maybe_handle_watchlist_natural_language(text)
-        if watchlist_response is not None:
-            self._persist_turn(chat_id, user_id, "assistant", watchlist_response)
-            self._persist_chat_state(chat_id, user_id, text, watchlist_response)
-            return ChatResponse(watchlist_response, parse_mode=None)
+        if single_agent is None:
+            watchlist_response = self._maybe_handle_watchlist_natural_language(text)
+            if watchlist_response is not None:
+                self._persist_turn(chat_id, user_id, "assistant", watchlist_response)
+                self._persist_chat_state(chat_id, user_id, text, watchlist_response)
+                return ChatResponse(watchlist_response, parse_mode=None)
 
         alert_option_response = self._maybe_handle_alert_option_reply(chat_id, text)
         if alert_option_response is not None:
@@ -1284,11 +1352,12 @@ class ChatService:
             self._persist_chat_state(chat_id, user_id, text, alert_option_response)
             return ChatResponse(alert_option_response, parse_mode=None)
 
-        alert_response = self._maybe_handle_alert_natural_language(chat_id, text)
-        if alert_response is not None:
-            self._persist_turn(chat_id, user_id, "assistant", alert_response)
-            self._persist_chat_state(chat_id, user_id, text, alert_response)
-            return ChatResponse(alert_response, parse_mode=None)
+        if single_agent is None:
+            alert_response = self._maybe_handle_alert_natural_language(chat_id, text)
+            if alert_response is not None:
+                self._persist_turn(chat_id, user_id, "assistant", alert_response)
+                self._persist_chat_state(chat_id, user_id, text, alert_response)
+                return ChatResponse(alert_response, parse_mode=None)
 
         report_response = self._maybe_handle_report_natural_language(chat_id, text)
         if report_response is not None:
@@ -1314,12 +1383,28 @@ class ChatService:
                 self._persist_chat_state(chat_id, user_id, text, clarification)
                 return ChatResponse(clarification, parse_mode=None)
 
+        if single_agent is not None:
+            if self.runtime.alert_system is not None:
+                self.runtime.alert_system.set_active_chat_id(chat_id)
+            session_id = f"telegram-{chat_id}"
+            response = run_single_agent_message(
+                single_agent,
+                self._enforce_english_policy(
+                    self._context_prefix(chat_id, self._apply_trade_mode_policy(chat_id, text))
+                ),
+                user_id=str(user_id),
+                session_id=session_id,
+            )
+            self._persist_turn(chat_id, user_id, "assistant", response)
+            self._persist_chat_state(chat_id, user_id, text, response)
+            return ChatResponse(response, parse_mode=None)
+
         live_trading_agent = getattr(self.runtime, "live_trading_agent", None)
         if live_trading_agent is not None and self._is_trade_intent_text(text):
             session_id = f"telegram-{chat_id}"
             response = run_live_trading_message(
                 live_trading_agent,
-                text,
+                self._enforce_english_policy(text),
                 user_id=str(user_id),
                 session_id=session_id,
                 trade_execution_mode=self._get_trade_mode(chat_id),
@@ -1332,7 +1417,9 @@ class ChatService:
             session_id = f"telegram-{chat_id}"
             response = run_team_message(
                 self.runtime.team,
-                self._context_prefix(chat_id, self._apply_trade_mode_policy(chat_id, text)),
+                self._enforce_english_policy(
+                    self._context_prefix(chat_id, self._apply_trade_mode_policy(chat_id, text))
+                ),
                 user_id=str(user_id),
                 session_id=session_id,
             )
@@ -1344,7 +1431,7 @@ class ChatService:
             session_id = f"telegram-{chat_id}"
             response = run_agent_message(
                 self.runtime.agent,
-                self._context_prefix(chat_id, text),
+                self._enforce_english_policy(self._context_prefix(chat_id, text)),
                 user_id=str(user_id),
                 session_id=session_id,
                 trade_execution_mode=self._get_trade_mode(chat_id),

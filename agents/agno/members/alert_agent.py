@@ -525,7 +525,7 @@ def create_alert_agent(alert_system) -> Optional[Agent]:
         "- WATCH (score 40-70): Monitor closely",
         "- IGNORE (score <40): Not worth following",
         "",
-        "Respond in the same language as the user's latest message (Spanish or English), concisely. When analyzing, include the score and the main reasons.",
+        "Always respond in English, concisely. When analyzing, include the score and the main reasons.",
     ]
 
     # Build kwargs compatible with current agno version
@@ -568,7 +568,7 @@ def run_agent_analysis(agent: Agent, message: str) -> str:
         content = getattr(response, "content", None)
 
         if content is None:
-            return "No se pudo generar una respuesta."
+            return "No response could be generated."
 
         if isinstance(content, str):
             return content
@@ -577,4 +577,4 @@ def run_agent_analysis(agent: Agent, message: str) -> str:
 
     except Exception as e:
         logger.error(f"Agent analysis failed: {e}")
-        return f"Error en el análisis: {e}"
+        return f"Analysis error: {e}"

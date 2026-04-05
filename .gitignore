@@ -43,3 +43,4 @@ pnpm-debug.log*
 # Runtime data
 core/alerts/data/*.json
 supabase/.temp/
+agents/mastra-only-read/*
